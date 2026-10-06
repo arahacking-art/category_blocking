@@ -1,0 +1,148 @@
+import traceback
+from datetime import datetime, timedelta
+from collections import defaultdict
+import pytz
+from crowdstrike.foundry.function import Request, Response
+from falconpy import FirewallManagement
+from logging import Logger
+
+from app_core import FUNC, get_client
+
+@FUNC.handler(method='GET', path='/domain-analytics')
+def get_domain_analytics(request: Request, _: dict, logger: Logger) -> Response:
+    """Generate analytics for domain blocking events."""
+    logger.info("Starting /domain-analytics handler")
+    try:
+        try:
+            firewall_mgmt = get_client(FirewallManagement)
+            logger.info("Using cached Falcon client")
+        except Exception as e:
+            logger.error(f"Failed to initialize Falcon client: {str(e)}")
+            logger.error(traceback.format_exc())
+            return Response(code=500, body={"error": "Falcon client initialization failed"})
+
+        # Fetch events for the last 15 days
+        end_time = datetime.now(pytz.UTC)
+        start_time = end_time - timedelta(days=15)
+        time_filter = f"timestamp:>'{start_time.isoformat()}'"
+
+        logger.info(f"Fetching events from {start_time} to {end_time}")
+
+        domain_visits: dict = defaultdict(int)
+        domain_ips: dict = defaultdict(set)
+        domain_hosts: dict = defaultdict(set)
+        domain_first_seen: dict = {}
+        domain_last_seen: dict = {}
+        domain_policy: dict = {}
+        domain_rule: dict = {}
+        daily_blocks: dict = defaultdict(int)
+        all_unique_hosts: set = set()
+
+        offset = 0
+        limit = 500
+
+        while True:
+            try:
+                query_response = firewall_mgmt.query_events(parameters={
+                    'filter': time_filter,
+                    'limit': limit,
+                    'offset': offset,
+                    'sort': 'timestamp.desc'
+                })
+
+                if query_response['status_code'] != 200 or not query_response['body']['resources']:
+                    break
+
+                event_ids = query_response['body']['resources']
+                events_response = firewall_mgmt.get_events(ids=event_ids)
+
+                if events_response['status_code'] == 200:
+                    for event in events_response['body']['resources']:
+                        if 'domain_name_list' not in event:
+                            continue
+
+                        domain = event['domain_name_list']
+                        remote_ip = event.get('remote_address', '')
+                        host = event.get('host_name', 'Unknown')
+                        policy = event.get('policy_name', 'Unknown')
+                        rule = event.get('rule_name', 'Unknown')
+
+                        try:
+                            ts = datetime.fromisoformat(event['timestamp'].replace('Z', '+00:00'))
+                        except (KeyError, ValueError):
+                            ts = None
+
+                        domain_visits[domain] += 1
+                        domain_ips[domain].add(remote_ip)
+                        domain_hosts[domain].add(host)
+                        all_unique_hosts.add(host)
+
+                        if ts is not None:
+                            if domain not in domain_first_seen:
+                                domain_first_seen[domain] = ts
+                                domain_last_seen[domain] = ts
+                            else:
+                                if ts < domain_first_seen[domain]:
+                                    domain_first_seen[domain] = ts
+                                if ts > domain_last_seen[domain]:
+                                    domain_last_seen[domain] = ts
+                            daily_blocks[ts.date().isoformat()] += 1
+
+                        if domain not in domain_policy:
+                            domain_policy[domain] = policy
+                            domain_rule[domain] = rule
+
+                offset += limit
+                if len(event_ids) < limit:
+                    break
+
+            except Exception as e:
+                logger.error(f"Error fetching events batch: {str(e)}")
+                break
+
+        logger.info(f"Total unique domains aggregated: {len(domain_visits)}")
+
+        top_domains = sorted(domain_visits.items(), key=lambda x: x[1], reverse=True)[:20]
+        total_blocks = sum(domain_visits.values())
+
+        domain_analysis = {}
+        for domain, count in top_domains:
+            domain_analysis[domain] = {
+                'visit_count': count,
+                'unique_ips': len(domain_ips[domain]),
+                'unique_hosts': len(domain_hosts[domain]),
+                'first_seen': domain_first_seen[domain].isoformat() if domain in domain_first_seen else None,
+                'last_seen': domain_last_seen[domain].isoformat() if domain in domain_last_seen else None,
+                'policy_name': domain_policy.get(domain, 'Unknown'),
+                'rule_name': domain_rule.get(domain, 'Unknown')
+            }
+
+        visualization_data = {
+            'bar_chart': {
+                'domains': [d for d, _ in top_domains],
+                'visits': [c for _, c in top_domains]
+            },
+            'comparison_chart': {
+                'domains': [d for d, _ in top_domains[:10]],
+                'visits': [c for _, c in top_domains[:10]],
+                'unique_ips': [len(domain_ips[d]) for d, _ in top_domains[:10]]
+            },
+            'summary': {
+                'total_blocks': total_blocks,
+                'unique_domains': len(domain_analysis),
+                'unique_hosts': len(all_unique_hosts)
+            }
+        }
+
+        return Response(
+            code=200,
+            body={
+                'analysis': domain_analysis,
+                'visualization_data': visualization_data
+            }
+        )
+
+    except Exception as e:
+        logger.error(f"Error in domain analytics: {str(e)}")
+        logger.error(traceback.format_exc())
+        return Response(code=500, body={"error": "Failed to generate analytics"})

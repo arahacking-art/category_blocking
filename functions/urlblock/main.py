@@ -1,0 +1,30 @@
+"""
+URL Block Function Module
+
+This module provides functionality for managing URL blocking rules in CrowdStrike Falcon.
+It delegates handling to specific modules in the `handlers` directory.
+"""
+
+from crowdstrike.foundry.function import Request, Response
+from logging import Logger
+import traceback
+from app_core import FUNC, APP_VERSION
+
+# Import all handlers so they register their endpoints with FUNC
+import handlers.analytics
+import handlers.categories
+import handlers.policies
+import handlers.relationships
+
+@FUNC.handler(method='GET', path='/healthz')
+def healthz(request: Request, _: dict, logger: Logger) -> Response:
+    """Basic health check — confirms the function is running."""
+    logger.info("Starting /healthz handler")
+    try:
+        return Response(code=200, body={"status": "ok", "version": APP_VERSION})
+    except Exception as e:
+        logger.error(traceback.format_exc())
+        return Response(code=500, body={"error": "Failed to run healthz"})
+
+if __name__ == '__main__':
+    FUNC.run()

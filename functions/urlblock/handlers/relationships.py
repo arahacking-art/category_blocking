@@ -6,6 +6,7 @@ from falconpy import CustomStorage
 from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_RELATION_VER
+from app_utils import paginated_search
 
 @FUNC.handler(method='POST', path='/manage-relationship')
 def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
@@ -50,16 +51,11 @@ def get_relationship(request: Request, _: dict, logger: Logger) -> Response:
     logger.info("Starting /get-relationship handler")
     try:
         custom_storage = get_client(CustomStorage)
-        response = custom_storage.SearchObjects(
-            collection_name="relationship",
-            collection_version=COLLECTION_RELATION_VER,
-            limit=1000
-        )
-
-        if response.get('status_code') != 200:
+        result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+        if "error" in result:
             raise ValueError("Failed to fetch relationship")
 
-        relationship = response.get('resources', [])
+        relationship = result['resources']
         nodes, links, nodes_set = [], [], set()
 
         for rel in relationship:
@@ -77,7 +73,7 @@ def get_relationship(request: Request, _: dict, logger: Logger) -> Response:
             links.append({"source": rel['rule_group_id'], "target": rel['host_group_id']})
 
         logger.info("Successfully completed /get-relationship")
-        return Response(code=200, body={"success": True, "relationship": relationship, "graphData": {"nodes": nodes, "links": links}})
+        return Response(code=200, body={"success": True, "relationship": relationship, "graphData": {"nodes": nodes, "links": links}, "pagination": result["pagination"]})
     except Exception as e:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to fetch"})

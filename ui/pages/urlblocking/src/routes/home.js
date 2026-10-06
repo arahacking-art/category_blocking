@@ -542,6 +542,7 @@ function Home() {
       {status && (
         <SlAlert
           variant={status.type === 'error' ? 'danger' : status.type === 'success' ? 'success' : 'info'}
+          open
           closable
           onSlAfterHide={() => setStatus(null)}
         >

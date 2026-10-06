@@ -143,6 +143,7 @@ return (
         {status && (
           <SlAlert
             variant={status.type === 'error' ? 'danger' : 'success'}
+            open
             closable
             onSlAfterHide={() => setStatus(null)}
           >

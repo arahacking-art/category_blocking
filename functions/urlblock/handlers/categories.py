@@ -9,8 +9,10 @@ from crowdstrike.foundry.function import APIError, Request, Response
 from falconpy import CustomStorage
 from logging import Logger
 
+from concurrent.futures import ThreadPoolExecutor
+
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER
-from app_utils import _sanitize_url_list
+from app_utils import _sanitize_url_list, paginated_search
 
 # ---------------------------------------------------------------------------
 # CSV Helpers
@@ -35,11 +37,11 @@ def validate_record(record):
     if not record.get('domain'):
         raise ValueError("Missing required field: domain")
 
-def process_csv_records(csv_path, custom_storage, logger, collection_name="domain", collection_version=COLLECTION_DOMAIN_VER):
-    """Process CSV records and create collection objects."""
-    success_count = 0
+def process_csv_records(csv_path, custom_storage, logger, collection_name="domain", collection_version=COLLECTION_DOMAIN_VER, max_workers=10):
+    """Process CSV records and write collection objects in parallel."""
     error_count = 0
     total_rows = 0
+    records = []
     try:
         with open(csv_path, 'r', encoding='utf-8') as file:
             csv_reader = csv.reader(file)
@@ -50,19 +52,34 @@ def process_csv_records(csv_path, custom_storage, logger, collection_name="domai
                     if len(row) >= 2:
                         record = transform_csv_row(row)
                         validate_record(record)
-                        custom_storage.PutObjectByVersion(
-                            body=record,
-                            collection_name=collection_name,
-                            collection_version=collection_version,
-                            object_key=record['category']
-                        )
-                        success_count += 1
+                        records.append(record)
                 except ValueError as e:
                     error_count += 1
                     logger.error(f"Error processing row {total_rows}: {str(e)}")
-                    continue
     except IOError as e:
         raise IOError(f"Error reading CSV file: {str(e)}") from e
+
+    def _put(record):
+        resp = custom_storage.PutObjectByVersion(
+            body=record,
+            collection_name=collection_name,
+            collection_version=collection_version,
+            object_key=record['category']
+        )
+        if isinstance(resp, dict) and resp.get('status_code', 200) >= 400:
+            raise RuntimeError(f"HTTP {resp.get('status_code')}")
+
+    success_count = 0
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        futures = [(r, executor.submit(_put, r)) for r in records]
+        for record, future in futures:
+            try:
+                future.result()
+                success_count += 1
+            except Exception as e:
+                error_count += 1
+                logger.error(f"Error writing category {record['category']}: {str(e)}")
+
     return {
         "total_rows": total_rows,
         "success_count": success_count,
@@ -111,37 +128,6 @@ def import_csv_handler(request: Request, _: dict, logger: Logger) -> Response:
         )
 
 
-@FUNC.handler(method='GET', path='/categories')
-def get_categories(request: Request, _: dict, logger: Logger) -> Response:
-    """Retrieve categories directly from CSV file."""
-    logger.info("Starting /categories handler")
-    try:
-        current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        csv_file = os.path.join(current_dir, 'output.csv')
-        
-        if not os.path.exists(csv_file):
-            return Response(code=404, body={"error": "CSV file not found", "path": csv_file})
-
-        categories_dict = {}
-        with open(csv_file, 'r', encoding='utf-8') as f:
-            csv_reader = csv.reader(f)
-            next(csv_reader)
-            for row in csv_reader:
-                if len(row) >= 2:
-                    category = row[0].strip()
-                    urls = row[1].strip()
-                    url_list = [url.strip() for url in urls.split(';') if url.strip()]
-                    if url_list:
-                        categories_dict[category] = ';'.join(url_list)
-
-        return Response(code=200, body={'categories': categories_dict})
-
-    except Exception as e:
-        logger.error(f"Error reading categories: {str(e)}")
-        logger.error(traceback.format_exc())
-        return Response(code=500, body={"error": "Failed to read categories"})
-
-
 @FUNC.handler(method='GET', path='/list-categories')
 def list_categories(request: Request, _: dict, logger: Logger) -> Response:
     """List all categories from the domain collection."""
@@ -149,22 +135,20 @@ def list_categories(request: Request, _: dict, logger: Logger) -> Response:
     try:
         custom_storage = get_client(CustomStorage)
         try:
-            limit = int(request.params.limit if hasattr(request.params, 'limit') else 1000)
-        except (ValueError, AttributeError):
-            limit = 1000
+            page_size = min(int(request.params.limit), 500) if hasattr(request.params, 'limit') else 100
+        except (ValueError, AttributeError, TypeError):
+            page_size = 100
+        try:
+            max_pages = max(1, int(request.params.max_pages)) if hasattr(request.params, 'max_pages') else 10
+        except (ValueError, AttributeError, TypeError):
+            max_pages = 10
 
-        response = custom_storage.SearchObjects(
-            collection_name='domain',
-            limit=limit,
-            collection_version=COLLECTION_DOMAIN_VER
-        )
+        result = paginated_search(custom_storage, 'domain', COLLECTION_DOMAIN_VER,
+                                  page_size=page_size, max_pages=max_pages)
+        if "error" in result:
+            return Response(code=400, errors=[APIError(code=400, message=f"API Error: {result['error']}")])
 
-        if not response:
-            return Response(code=500, errors=[APIError(code=500, message="No response received from API")])
-        if "errors" in response:
-            return Response(code=400, errors=[APIError(code=400, message=f"API Error: {response['errors']}")])
-
-        resources = response.get('resources', [])
+        resources = result['resources']
         categories = set()
         domains = []
 
@@ -188,7 +172,8 @@ def list_categories(request: Request, _: dict, logger: Logger) -> Response:
                 "unique_categories": len(categories),
                 "categories": sorted(list(categories)),
                 "domains": domains,
-                "metadata": {"limit": limit, "timestamp": int(time.time())}
+                "metadata": {"limit": page_size, "timestamp": int(time.time())},
+                "pagination": result["pagination"]
             },
             code=200
         )

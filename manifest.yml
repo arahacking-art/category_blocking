@@ -83,20 +83,13 @@ functions:
       description: react block
       path: functions/urlblock
       environment_variables: {}
+      max_exec_duration_seconds: 300
+      max_exec_memory_mb: 512
       handlers:
         - name: urlblock
           description: react block
           method: GET
           api_path: /urlblock
-          payload_type: ""
-          request_schema: null
-          response_schema: null
-          workflow_integration: null
-          permissions: []
-        - name: categories
-          description: get categories
-          method: GET
-          api_path: /categories
           payload_type: ""
           request_schema: null
           response_schema: null

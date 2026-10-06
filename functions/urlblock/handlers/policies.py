@@ -9,7 +9,7 @@ from falconpy import FirewallManagement, FirewallPolicies, CustomStorage, HostGr
 from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER, COLLECTION_RELATION_VER
-from app_utils import _sanitize_url_list, _build_rule
+from app_utils import _sanitize_url_list, _build_rule, paginated_search
 
 
 @FUNC.handler(method='GET', path='/urlblock')
@@ -146,10 +146,12 @@ def create_rule(request: Request, _: dict, logger: Logger) -> Response:
 def list_policies(_: Request, __: dict, logger: Logger) -> Response:
     try:
         custom_storage = get_client(CustomStorage)
-        response = custom_storage.SearchObjects(collection_name="relationship", collection_version=COLLECTION_RELATION_VER, limit=1000)
-        
+        result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+        if "error" in result:
+            return Response(code=500, body={"error": "Failed to list policies"})
+
         grouped: dict = {}
-        for item in response.get('resources', []):
+        for item in result['resources']:
             if not isinstance(item, dict): continue
             rg_id = item.get('rule_group_id')
             if not rg_id: continue
@@ -166,7 +168,7 @@ def list_policies(_: Request, __: dict, logger: Logger) -> Response:
             if cat and cat not in grouped[rg_id]["categories"]:
                 grouped[rg_id]["categories"].append(cat)
 
-        return Response(code=200, body={"policies": list(grouped.values())})
+        return Response(code=200, body={"policies": list(grouped.values()), "pagination": result["pagination"]})
     except Exception as e:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to list policies"})
@@ -174,14 +176,14 @@ def list_policies(_: Request, __: dict, logger: Logger) -> Response:
 
 def _parallel_delete_relationships(rule_group_id, custom_storage):
     """Deletes relationships in parallel (Improvement C)."""
-    list_resp = custom_storage.SearchObjects(collection_name="relationship", collection_version=COLLECTION_RELATION_VER, limit=1000)
-    if list_resp.get('status_code') == 200:
+    result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+    if "error" not in result:
         keys_to_delete = []
-        for item in list_resp.get('resources', []):
-            if isinstance(item, dict) and item.get('rule_group_id') == rule_group_id:
+        for item in result['resources']:
+            if item.get('rule_group_id') == rule_group_id:
                 obj_key = item.get('_key') or item.get('object_key') or item.get('key')
                 if obj_key: keys_to_delete.append(obj_key)
-        
+
         def _delete_single(key):
             custom_storage.DeleteObject(collection_name="relationship", collection_version=COLLECTION_RELATION_VER, object_key=key)
 
@@ -276,16 +278,23 @@ def simulate_policy(request: Request, _: dict, logger: Logger) -> Response:
         if not fqdn: return Response(code=400, body={"error": "fqdn required"})
         
         custom_storage = get_client(CustomStorage)
-        response = custom_storage.ListObjectsByVersion(collection_name='domain', limit=1000, collection_version=COLLECTION_DOMAIN_VER)
-        
         wildcard_query = f'*.{fqdn}'
-        for item in response.get('resources', []):
-            if not isinstance(item, dict): continue
+
+        def _matches(item):
             domains = {d.strip().lower() for d in item.get('domain', '').split(';') if d.strip()}
-            if fqdn in domains or wildcard_query in domains:
-                return Response(code=200, body={"encontrado": True, "categoria": item.get('category'), "mensaje": f"Bloqueado por {item.get('category')}"})
-                
-        return Response(code=200, body={"encontrado": False, "categoria": None, "mensaje": "No bloqueado"})
+            return fqdn in domains or wildcard_query in domains
+
+        # Early return: stop paging as soon as the domain is found
+        result = paginated_search(custom_storage, 'domain', COLLECTION_DOMAIN_VER,
+                                  page_size=100, max_pages=50, stop_when=_matches)
+        if "error" in result:
+            return Response(code=500, body={"error": "Failed to simulate"})
+
+        item = result["match"]
+        if item:
+            return Response(code=200, body={"encontrado": True, "categoria": item.get('category'), "mensaje": f"Bloqueado por {item.get('category')}", "pagination": result["pagination"]})
+
+        return Response(code=200, body={"encontrado": False, "categoria": None, "mensaje": "No bloqueado", "pagination": result["pagination"]})
     except Exception as e:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to simulate"})
@@ -335,18 +344,13 @@ def health_check(request: Request, _: dict, logger: Logger) -> Response:
         mgmt = get_client(FirewallManagement)
         
         # 1. Read all relationships
-        response = custom_storage.SearchObjects(
-            collection_name="relationship",
-            collection_version=COLLECTION_RELATION_VER,
-            limit=1000
-        )
-        
-        if response.get('status_code') != 200:
+        result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+        if "error" in result:
             return Response(code=500, body={"error": "Failed to read relationships"})
-            
+
         # 2. Group by policy_name
         unique_policies = {}
-        for item in response.get('resources', []):
+        for item in result['resources']:
             if not isinstance(item, dict): continue
             policy_name = item.get('policy_name')
             if not policy_name: continue
@@ -418,7 +422,8 @@ def health_check(request: Request, _: dict, logger: Logger) -> Response:
             "total_policies_checked": len(unique_policies),
             "healthy_count": healthy_count,
             "issues_count": issues_count,
-            "policies": results
+            "policies": results,
+            "pagination": result["pagination"]
         }
         
         logger.info(f"Successfully completed /health-check")

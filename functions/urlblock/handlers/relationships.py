@@ -6,7 +6,7 @@ from falconpy import CustomStorage
 from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_RELATION_VER
-from app_utils import read_all_objects, relationship_key, _get_username
+from app_utils import read_all_objects, relationship_key, resolve_creator
 
 @FUNC.handler(method='POST', path='/manage-relationship')
 def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
@@ -22,7 +22,7 @@ def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
             "host_group_name": request.body.get('host_group_name', ''),
             "policy_name": request.body.get('policy_name', ''),
             "created_at": request.body.get('created_at', datetime.now(pytz.UTC).isoformat()),
-            "created_by": _get_username(request)
+            "created_by": resolve_creator(request, body_field='created_by')[0]
         }
 
         required_fields = ['category_name', 'rule_group_id', 'host_group_id']

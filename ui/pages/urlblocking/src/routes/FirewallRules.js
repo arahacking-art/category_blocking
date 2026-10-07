@@ -182,6 +182,7 @@ function FirewallRules() {
         platform:    editPolicy.platform,
         categories:  categoriesPayload,
         whitelist:   editWhitelist.trim(),
+        username:    falcon?.data?.user?.username || '',
       });
 
       setSaveStatus({ type: 'success', message: '¡Política actualizada exitosamente!' });

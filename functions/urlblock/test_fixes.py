@@ -86,13 +86,27 @@ class PolicyTestCase(unittest.TestCase):
     def create(self, context=None):
         return policies.create_rule(req(dict(self.create_body), context=context), None, self.logger)
 
-    def test_create_rule_success_stores_policy_id_and_context_user(self):
+    def test_create_rule_success_prefers_context_user(self):
         resp = self.create(context={"user": {"username": "ana"}})
         self.assertEqual(resp.code, 200)
         self.assertEqual((resp.body["policyId"], resp.body["ruleGroupId"]), ("pol-new", "rg-new"))
         self.assertEqual((resp.body["rulesCreated"], resp.body["relationsWritten"]), (2, 1))
+        self.assertEqual((resp.body["createdBy"], resp.body["createdBySource"]), ("ana", "context"))
         record = self.rel()["Games_rg-new_hg1"]
-        self.assertEqual((record["policy_id"], record["created_by"]), ("pol-new", "ana"))
+        self.assertEqual((record["policy_id"], record["created_by"], record["created_by_source"]),
+                         ("pol-new", "ana", "context"))
+
+    def test_create_rule_falls_back_to_ui_user_and_returns_debug_context(self):
+        resp = self.create(context={"cid": "c1", "access_token": "secret"})
+        self.assertEqual((resp.body["createdBy"], resp.body["createdBySource"]), ("spoofed", "ui"))
+        self.assertEqual(resp.body["debugContext"], {"cid": "c1", "access_token": "<redacted>"})
+        self.assertEqual(self.rel()["Games_rg-new_hg1"]["created_by_source"], "ui")
+
+    def test_list_policies_exposes_created_by_source(self):
+        self.create()
+        policy = next(p for p in policies.list_policies(req(), None, self.logger).body["policies"]
+                      if p["rule_group_id"] == "rg-new")
+        self.assertEqual((policy["created_by"], policy["created_by_source"]), ("spoofed", "ui"))
 
     def test_create_rule_logs_redacted_context(self):
         self.create(context={"user_id": "u", "access_token": "secret"})

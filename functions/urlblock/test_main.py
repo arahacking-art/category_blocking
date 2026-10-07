@@ -63,6 +63,13 @@ class UsernameTestCase(unittest.TestCase):
     def test_unknown_without_context(self):
         self.assertEqual(_get_username(req()), "unknown")
 
+    def test_resolve_creator_order(self):
+        from app_utils import resolve_creator
+        self.assertEqual(resolve_creator(req({"username": "x"}, context={"user_id": "u"})), ("u", "context"))
+        self.assertEqual(resolve_creator(req({"username": " ana@x.com "})), ("ana@x.com", "ui"))
+        self.assertEqual(resolve_creator(req({"username": "unknown"})), ("unknown", "none"))
+        self.assertEqual(resolve_creator(req()), ("unknown", "none"))
+
     def test_safe_context_redacts_tokens(self):
         ctx = safe_context(req(context={"user_id": "u", "access_token": "secret"}))
         self.assertEqual(ctx, {"user_id": "u", "access_token": "<redacted>"})
@@ -266,7 +273,7 @@ class RelationshipTestCase(HandlerTestCase):
         self.assertEqual(relationships.get_relationship(req(), None, self.logger).code, 500)
 
     def test_manage_relationship_uses_context_user_and_deterministic_key(self):
-        body = {"category_name": "Games", "rule_group_id": "rg-1", "host_group_id": "hg-1", "created_by": "spoofed"}
+        body = {"category_name": "Games", "rule_group_id": "rg-1", "host_group_id": "hg-1", "created_by": "ui-user"}
         resp = relationships.manage_relationship(req(body, context={"user": {"username": "ana"}}), None, self.logger)
         self.assertEqual(resp.code, 200)
         self.assertEqual(resp.body["relationshipId"], "Games_rg-1_hg-1")

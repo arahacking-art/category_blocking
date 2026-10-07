@@ -9,7 +9,7 @@ from logging import Logger
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER, COLLECTION_RELATION_VER
 from app_utils import (
     _sanitize_url_list, _build_rule, read_all_objects, delete_object, query_param,
-    relationship_key, validate_fqdn, _validate_falcon_response, _get_username, safe_context,
+    relationship_key, validate_fqdn, _validate_falcon_response, resolve_creator, safe_context,
 )
 
 PLATFORM_NAMES = {'windows': 'Windows', 'mac': 'Mac', 'linux': 'Linux'}
@@ -44,7 +44,7 @@ def on_create(_: Request, __: dict, logger: Logger) -> Response:
 
 def _write_relationships(categories_list, rule_group_id, host_group_id, host_group_name,
                          policy_name, platform, whitelist, username, policy_id,
-                         custom_storage, logger=None):
+                         custom_storage, logger=None, created_by_source=None):
     """Write relationships to custom storage in parallel. Returns success/error counts."""
     def _write_single(cat):
         record = {
@@ -58,7 +58,8 @@ def _write_relationships(categories_list, rule_group_id, host_group_id, host_gro
             "platform": platform,
             "whitelist": whitelist,
             "created_at": datetime.now(pytz.UTC).isoformat(),
-            "created_by": username
+            "created_by": username,
+            "created_by_source": created_by_source or "none"
         }
         try:
             resp = custom_storage.PutObjectByVersion(
@@ -177,7 +178,7 @@ def create_rule(request: Request, _: dict, logger: Logger) -> Response:
         categories = request.body.get('categories', {})
         whitelist_raw = request.body.get('whitelist', '').strip()
         host_group_name = request.body.get('hostGroupName', 'Unknown Host Group')
-        username = _get_username(request)
+        username, username_source = resolve_creator(request)
 
         platform_name = PLATFORM_NAMES.get(platform)
         if not platform_name:
@@ -203,7 +204,8 @@ def create_rule(request: Request, _: dict, logger: Logger) -> Response:
         # Relationship write failures are logged but do not roll back Falcon resources
         write_result = _write_relationships(
             list(categories.keys()), rule_group_id, host_group_id, host_group_name,
-            policy_name, platform, whitelist_raw, username, policy_id, custom_storage, logger)
+            policy_name, platform, whitelist_raw, username, policy_id, custom_storage, logger,
+            created_by_source=username_source)
         if write_result["error_count"]:
             logger.warning(f"create-rule: {write_result['error_count']} relationship writes failed")
 
@@ -214,7 +216,10 @@ def create_rule(request: Request, _: dict, logger: Logger) -> Response:
             "policyId": policy_id,
             "ruleGroupId": rule_group_id,
             "rulesCreated": len(rules_list),
-            "relationsWritten": write_result["success_count"]
+            "relationsWritten": write_result["success_count"],
+            "createdBy": username,
+            "createdBySource": username_source,
+            "debugContext": safe_context(request)  # TEMP: remove once the context shape is known
         })
 
     except Exception:
@@ -243,6 +248,7 @@ def list_policies(_: Request, __: dict, logger: Logger) -> Response:
                     "host_group_id": item.get('host_group_id', ''), "host_group_name": item.get('host_group_name', ''),
                     "platform": item.get('platform', ''), "whitelist": item.get('whitelist', ''),
                     "created_at": item.get('created_at', ''), "created_by": item.get('created_by', ''),
+                    "created_by_source": item.get('created_by_source', ''),
                     "categories": []
                 }
             cat = item.get('category_name')
@@ -344,7 +350,7 @@ def update_policy(request: Request, _: dict, logger: Logger) -> Response:
         categories = body.get('categories', {})
         whitelist_raw = body.get('whitelist', '').strip()
         host_group_name = body.get('hostGroupName', 'Unknown')
-        username = _get_username(request)
+        username, username_source = resolve_creator(request)
 
         platform_name = PLATFORM_NAMES.get(platform)
         if not platform_name or not old_rg_id or not policy_name or not host_group_id or not isinstance(categories, dict):
@@ -382,7 +388,8 @@ def update_policy(request: Request, _: dict, logger: Logger) -> Response:
         # Phase 4: write the new relationships
         write_result = _write_relationships(
             list(categories.keys()), new_rg_id, host_group_id, host_group_name,
-            policy_name, platform, whitelist_raw, username, new_policy_id, custom_storage, logger)
+            policy_name, platform, whitelist_raw, username, new_policy_id, custom_storage, logger,
+            created_by_source=username_source)
 
         logger.info(f"Update-policy completed: {policy_name}, new RG: {new_rg_id}")
         return Response(code=200, body={

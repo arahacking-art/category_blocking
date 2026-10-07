@@ -42,7 +42,6 @@ function About() {
   const handleCreateCategory = async () => {
     try {
       setIsLoading(true);
-      console.log('Starting category creation');
 
       if (!categoryName.trim()) {
         throw new Error('Please enter a category name');

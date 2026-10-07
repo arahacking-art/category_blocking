@@ -79,6 +79,24 @@ def _get_username(request) -> str:
     return 'unknown'
 
 
+def resolve_creator(request, body_field: str = 'username'):
+    """
+    Who performed the action, as (name, source):
+      - ("<user>", "context") when the Foundry request context identifies the user;
+      - ("<user>", "ui") otherwise, from the username the UI sends (Falcon session user;
+        not verified server-side, hence the recorded source);
+      - ("unknown", "none") when neither is available.
+    """
+    name = _get_username(request)
+    if name != 'unknown':
+        return name, 'context'
+    body = getattr(request, 'body', None)
+    value = body.get(body_field) if isinstance(body, dict) else None
+    if isinstance(value, str) and value.strip() and value.strip().lower() != 'unknown':
+        return value.strip(), 'ui'
+    return 'unknown', 'none'
+
+
 def safe_context(request) -> dict:
     """Request context without token-like values, for diagnostic logging."""
     context = getattr(request, 'context', None)

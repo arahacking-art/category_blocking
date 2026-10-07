@@ -43,10 +43,7 @@ function Home() {
   const [simulatorFqdn, setSimulatorFqdn] = useState('');
   const [simulatorResult, setSimulatorResult] = useState(null);
   const [isSimulating, setIsSimulating] = useState(false);
-
-  useEffect(() => {
-    console.log('Selected categories updated:', selectedCategories);
-  }, [selectedCategories]);
+  const [isCreating, setIsCreating] = useState(false);
 
   useEffect(() => {
     const loadData = async () => {
@@ -87,118 +84,86 @@ function Home() {
     if (falcon) loadData();
   }, [falcon, cachedCategories]);
 
+  // Reads the domains of every selected category and stores them as the current preview.
+  // Returns the {category: domains} map used to build the rule.
+  const buildPreview = async () => {
+    if (!selectedCategories || selectedCategories.length === 0) {
+      throw new Error('Please select at least one category');
+    }
+
+    const collection = falcon.collection({ collection: 'domain' });
+    const urlResults = await Promise.all(selectedCategories.map(async (category) => {
+      try {
+        const record = await collection.read(categoryKey(category));
+        return { category, domain: record?.domain || null };
+      } catch (error) {
+        console.warn(`Failed to fetch domains for category ${category}:`, error);
+        return { category, domain: null };
+      }
+    }));
+
+    const domainsMap = {};
+    urlResults.forEach(({ category, domain }) => {
+      if (domain) domainsMap[category] = domain;
+    });
+    setCategoryDomains(domainsMap);
+    setPreviewedCategories([...selectedCategories]);
+
+    const allUrls = Object.values(domainsMap).join(';');
+    setSelectedUrls(allUrls);
+    if (!allUrls) {
+      throw new Error('No domains found for selected categories');
+    }
+    return domainsMap;
+  };
+
   const handlePreview = async () => {
     try {
-      // Debug logging
-      console.log('HandlePreview called');
-      console.log('Selected Categories State:', selectedCategories);
-      console.log('Selected Categories Length:', selectedCategories.length);
-
-      if (!selectedCategories || selectedCategories.length === 0) {
-        console.log('No categories selected, throwing error');
-        throw new Error('Please select at least one category');
-      }
-
       setIsPreviewLoading(true);
-      setStatus({
-        type: 'info',
-        message: 'Loading domains from categories...'
-      });
-
-      const collection = falcon.collection({
-        collection: 'domain'
-      });
-
-      // FASE 5: Fetch URLs per category and keep them separate for the new payload format
-      const urlPromises = selectedCategories.map(async (category) => {
-        try {
-          const objectKey = categoryKey(category);
-          console.log(`Fetching domains for category: ${category}, key: ${objectKey}`);
-
-          const record = await collection.read(objectKey);
-          console.log(`Record for ${category}:`, record);
-
-          // Access the domain directly from the record
-          if (record && record.domain) {
-            return { category, domain: record.domain };
-          }
-          return { category, domain: null };
-        } catch (error) {
-          console.warn(`Failed to fetch domains for category ${category}:`, error);
-          return { category, domain: null };
-        }
-      });
-
-      const urlResults = await Promise.all(urlPromises);
-
-      // FASE 5: Build per-category domain map for the new multi-rule payload
-      const domainsMap = {};
-      urlResults.forEach(({ category, domain }) => {
-        if (domain) {
-          domainsMap[category] = domain;
-        }
-      });
-      setCategoryDomains(domainsMap);
-      setPreviewedCategories([...selectedCategories]);
-
-      // For preview display, join all domains together
-      const allUrls = Object.values(domainsMap).filter(Boolean).join(';');
-
-      if (!allUrls) {
-        throw new Error('No domains found for selected categories');
-      }
-
-      console.log('Combined URLs for preview:', allUrls);
-      console.log('Per-category domains map:', domainsMap);
-      setSelectedUrls(allUrls);
+      setStatus({ type: 'info', message: 'Loading domains from categories...' });
+      await buildPreview();
       setStatus({
         type: 'success',
         message: `Preview generated successfully with domains from ${selectedCategories.length} categories`
       });
-
     } catch (error) {
       console.error('Preview generation error:', error);
-      setStatus({
-        type: 'error',
-        message: error.message
-      });
+      setStatus({ type: 'error', message: error.message });
     } finally {
       setIsPreviewLoading(false);
     }
   };
 
-
   const handleCreateRule = async () => {
     try {
       if (!selectedHostGroup) throw new Error('Please select a host group');
       if (!policyName) throw new Error('Please enter a policy name');
-      if (!selectedUrls) throw new Error('Please preview domains first');
       if (!platform) throw new Error('Please select a platform');
-      if (Object.keys(categoryDomains).length === 0) throw new Error('Please preview domains first');
+      if (selectedCategories.length === 0) throw new Error('Please select at least one category');
 
-      // The rule is built from the preview: refuse if the selection changed afterwards
-      const sameSelection = previewedCategories.length === selectedCategories.length &&
+      setIsCreating(true);
+
+      // The rule is built from the preview: (re)generate it when missing or out of date
+      const previewIsCurrent = previewedCategories.length === selectedCategories.length &&
         selectedCategories.every(c => previewedCategories.includes(c));
-      if (!sameSelection) {
-        throw new Error('The category selection changed after the preview. Click "Preview" again.');
+      let domainsMap = categoryDomains;
+      if (!previewIsCurrent || Object.keys(categoryDomains).length === 0) {
+        setStatus({ type: 'info', message: 'Loading domains from categories...' });
+        domainsMap = await buildPreview();
       }
-      const withoutDomains = selectedCategories.filter(c => !categoryDomains[c]);
+
+      const withoutDomains = selectedCategories.filter(c => !domainsMap[c]);
       if (withoutDomains.length > 0) {
         throw new Error(`No domains found for: ${withoutDomains.join(', ')}. Unselect them or fix the categories.`);
       }
 
-      setStatus({
-        type: 'info',
-        message: 'Creating blocking rule...'
-      });
+      setStatus({ type: 'info', message: 'Creating blocking rule...' });
 
       const categoriesPayload = {};
       selectedCategories.forEach(category => {
-        if (categoryDomains[category]) {
-          categoriesPayload[category] = categoryDomains[category];
-        }
+        categoriesPayload[category] = domainsMap[category];
       });
-      
+
       const hostGroupName = hostGroups.find(g => g.id === selectedHostGroup)?.name;
 
       const result = await callFunction(falcon, 'POST', '/create-rule', {
@@ -207,7 +172,9 @@ function Home() {
         policyName: policyName,
         platform: platform.toLowerCase(),
         categories: categoriesPayload,
-        whitelist: whitelist.trim()
+        whitelist: whitelist.trim(),
+        // Falcon session user; the backend prefers the request context when it has one
+        username: falcon?.data?.user?.username || ''
       });
 
       setStatus({
@@ -227,10 +194,9 @@ function Home() {
 
     } catch (error) {
       console.error('Operation failed:', error);
-      setStatus({
-        type: 'error',
-        message: error.message
-      });
+      setStatus({ type: 'error', message: error.message });
+    } finally {
+      setIsCreating(false);
     }
   };
 
@@ -335,6 +301,8 @@ function Home() {
         <SlButton
           variant="primary"
           onClick={handleCreateRule}
+          loading={isCreating}
+          disabled={isPreviewLoading}
           style={{
             '--sl-button-font-size': 'var(--sl-font-size-medium)',
             '--sl-input-height-medium': '40px',

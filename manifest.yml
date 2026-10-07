@@ -21,6 +21,10 @@ ignored:
     - e2e/.+
     - functions/.*/venv
     - functions/.*/venv/.+
+    - functions/.*/__pycache__
+    - functions/.*/__pycache__/.+
+    - functions/.*/.*\.pyc
+    - functions/.*/.*test.*\.py
 ui:
     homepage: pages.urlblocking
     extensions: []

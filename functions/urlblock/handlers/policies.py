@@ -1,10 +1,11 @@
 import traceback
-from datetime import datetime
-import pytz
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime
+from logging import Logger
+
+import pytz
 from crowdstrike.foundry.function import Request, Response
 from falconpy import FirewallManagement, FirewallPolicies, CustomStorage, HostGroup
-from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER, COLLECTION_RELATION_VER
 from app_utils import (
@@ -30,7 +31,8 @@ def on_create(_: Request, __: dict, logger: Logger) -> Response:
         groups_details = hostgroup.get_host_groups(ids=groups)
         ok, err = _validate_falcon_response(groups_details, "get_host_groups", logger)
         if not ok:
-            return Response(code=groups_details.get("status_code", 500), body={"error": f"Failed to retrieve host groups: {err}"})
+            return Response(code=groups_details.get("status_code", 500),
+                            body={"error": f"Failed to retrieve host groups: {err}"})
 
         host_groups_list = [
             {"id": group["id"], "name": group["name"]}
@@ -93,7 +95,8 @@ def _build_rules_list(policy_name, categories, whitelist_raw):
     if whitelist_raw:
         wl_urls = _sanitize_url_list(whitelist_raw, separator=';')
         if wl_urls:
-            rules_list.append(_build_rule("whitelist_allow", "ALLOW", ';'.join(wl_urls), str(temp_counter), f"Whitelist for {policy_name}"))
+            rules_list.append(_build_rule("whitelist_allow", "ALLOW", ';'.join(wl_urls), str(temp_counter),
+                                          f"Whitelist for {policy_name}"))
             temp_counter += 1
 
     for category_name, urls_raw in categories.items():
@@ -102,7 +105,8 @@ def _build_rules_list(policy_name, categories, whitelist_raw):
         clean_urls = _sanitize_url_list(urls_raw, separator=';')
         if not clean_urls:
             continue
-        rules_list.append(_build_rule(f"deny_{category_name}", "DENY", ';'.join(clean_urls), str(temp_counter), f"Block {category_name}"))
+        rules_list.append(_build_rule(f"deny_{category_name}", "DENY", ';'.join(clean_urls), str(temp_counter),
+                                      f"Block {category_name}"))
         temp_counter += 1
 
     return rules_list
@@ -130,7 +134,8 @@ def _create_policy_with_rule_group(mgmt, fw_policies, policy_name, platform, pla
         description=f"Policy for {policy_name}", name=policy_name, platform_name=platform_name)
     ok, err = _validate_falcon_response(policy_resp, "create_policies", logger)
     if not ok:
-        return None, None, Response(code=policy_resp.get("status_code", 500), body={"error": f"Failed to create policy: {err}"})
+        return None, None, Response(code=policy_resp.get("status_code", 500),
+                                    body={"error": f"Failed to create policy: {err}"})
     policy_id = policy_resp["body"]["resources"][0]["id"]
 
     resp = fw_policies.perform_action(action_name="enable", ids=policy_id)
@@ -237,9 +242,11 @@ def list_policies(_: Request, __: dict, logger: Logger) -> Response:
 
         grouped: dict = {}
         for item in result['resources']:
-            if not isinstance(item, dict): continue
+            if not isinstance(item, dict):
+                continue
             rg_id = item.get('rule_group_id')
-            if not rg_id: continue
+            if not rg_id:
+                continue
 
             if rg_id not in grouped:
                 grouped[rg_id] = {
@@ -417,8 +424,10 @@ def _blocking_candidates(fqdn: str) -> list:
 def simulate_policy(request: Request, _: dict, logger: Logger) -> Response:
     try:
         fqdn = query_param(request, 'fqdn').strip().lower()
-        if not fqdn: return Response(code=400, body={"error": "fqdn required"})
-        if not validate_fqdn(fqdn): return Response(code=400, body={"error": "Invalid fqdn"})
+        if not fqdn:
+            return Response(code=400, body={"error": "fqdn required"})
+        if not validate_fqdn(fqdn):
+            return Response(code=400, body={"error": "Invalid fqdn"})
 
         custom_storage = get_client(CustomStorage)
         candidates = _blocking_candidates(fqdn)
@@ -437,10 +446,12 @@ def simulate_policy(request: Request, _: dict, logger: Logger) -> Response:
         if item:
             return Response(code=200, body={"encontrado": True, "categoria": item.get('category'),
                                             "regla": _matching_entry(item),
-                                            "mensaje": f"Bloqueado por {item.get('category')}", "pagination": result["pagination"]})
+                                            "mensaje": f"Bloqueado por {item.get('category')}",
+                                            "pagination": result["pagination"]})
 
-        return Response(code=200, body={"encontrado": False, "categoria": None, "mensaje": "No bloqueado", "pagination": result["pagination"]})
-    except Exception as e:
+        return Response(code=200, body={"encontrado": False, "categoria": None, "mensaje": "No bloqueado",
+                                        "pagination": result["pagination"]})
+    except Exception:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to simulate"})
 
@@ -453,15 +464,15 @@ def check_enforcement(request: Request, _: dict, logger: Logger) -> Response:
         policy_id = query_param(request, 'policy_id').strip()
         if not policy_id:
             return Response(code=400, body={"error": "policy_id is required"})
-            
+
         mgmt = get_client(FirewallManagement)
         resp = mgmt.get_policy_containers(ids=policy_id)
-        
+
         if resp.get('status_code') != 200 or not resp.get('body', {}).get('resources'):
             return Response(code=404, body={"error": "Policy container not found"})
-            
+
         container = resp['body']['resources'][0]
-        
+
         result = {
             "policy_id": container.get("policy_id"),
             "enforce": container.get("enforce"),
@@ -471,10 +482,10 @@ def check_enforcement(request: Request, _: dict, logger: Logger) -> Response:
             "test_mode": container.get("test_mode"),
             "rule_group_ids": container.get("rule_group_ids", [])
         }
-        
+
         logger.info(f"Successfully completed /check-enforcement for policy {policy_id}")
         return Response(code=200, body=result)
-    except Exception as e:
+    except Exception:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to check enforcement"})
 

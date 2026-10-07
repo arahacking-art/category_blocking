@@ -4,15 +4,16 @@ Requests use the real Foundry request model (see conftest.py) and Custom Storage
 in-memory FakeStorage, which answers with FalconPy's real response shapes.
 """
 
+import threading
 import unittest
 from unittest.mock import MagicMock, patch
 
 from crowdstrike.foundry.function import Request, RequestParams
 
-import main  # noqa: F401  (registers all handlers)
+import main  # noqa: F401  # pylint: disable=unused-import  # registers all handlers
 from app_utils import (
     list_object_keys, read_all_objects, parse_object_response, query_param, StorageError,
-    _get_username, safe_context,
+    _get_username, safe_context, resolve_creator,
 )
 from conftest import FakeStorage, falcon_response
 from handlers import categories, policies, relationships
@@ -64,7 +65,6 @@ class UsernameTestCase(unittest.TestCase):
         self.assertEqual(_get_username(req()), "unknown")
 
     def test_resolve_creator_order(self):
-        from app_utils import resolve_creator
         self.assertEqual(resolve_creator(req({"username": "x"}, context={"user_id": "u"})), ("u", "context"))
         self.assertEqual(resolve_creator(req({"username": " ana@x.com "})), ("ana@x.com", "ui"))
         self.assertEqual(resolve_creator(req({"username": "unknown"})), ("unknown", "none"))
@@ -223,7 +223,8 @@ class ImportCsvTestCase(HandlerTestCase):
         self.assertEqual(resp.body["domains_imported"], 6)
 
     def test_invalid_rows_and_case_conflicts_are_counted(self):
-        resp = self.run_csv("Games,steam.com\nGames,not a domain\n,x.com\nShort\nai applications,b.com\nAI_Applications,c.com\n")
+        resp = self.run_csv("Games,steam.com\nGames,not a domain\n,x.com\nShort\n"
+                            "ai applications,b.com\nAI_Applications,c.com\n")
         self.assertEqual(resp.body["successful_imports"], 2)   # Games + AI_Applications
         self.assertEqual(resp.body["failed_imports"], 3)       # bad domain, empty category, case conflict
         self.assertNotIn("ai_applications", self.store.objects(*DOMAIN))
@@ -236,7 +237,6 @@ class ImportCsvTestCase(HandlerTestCase):
         self.assertTrue(any("News" in str(c) for c in self.logger.error.call_args_list))
 
     def test_writes_run_concurrently(self):
-        import threading
         barrier = threading.Barrier(2, timeout=5)
         original_put = self.store.PutObjectByVersion
 
@@ -318,7 +318,8 @@ class SimulatePolicyTestCase(HandlerTestCase):
         self.assertEqual(policies.simulate_policy(req(), None, self.logger).code, 400)
 
     def test_candidates_never_include_bare_tld(self):
-        self.assertEqual(policies._blocking_candidates("a.b.com"), ["a.b.com", "*.a.b.com", "*.b.com"])
+        self.assertEqual(policies._blocking_candidates(  # pylint: disable=protected-access
+            "a.b.com"), ["a.b.com", "*.a.b.com", "*.b.com"])
 
 
 if __name__ == "__main__":

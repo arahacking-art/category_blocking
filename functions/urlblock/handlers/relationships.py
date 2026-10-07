@@ -1,9 +1,10 @@
 import traceback
 from datetime import datetime
+from logging import Logger
+
 import pytz
 from crowdstrike.foundry.function import Request, Response
 from falconpy import CustomStorage
-from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_RELATION_VER
 from app_utils import read_all_objects, relationship_key, resolve_creator
@@ -27,7 +28,8 @@ def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
 
         required_fields = ['category_name', 'rule_group_id', 'host_group_id']
         missing_fields = [f for f in required_fields if not relationship_record[f]]
-        if missing_fields: return Response(code=400, body={"error": "Missing required fields"})
+        if missing_fields:
+            return Response(code=400, body={"error": "Missing required fields"})
 
         rel_key = relationship_key(
             relationship_record['category_name'], relationship_record['rule_group_id'], relationship_record['host_group_id'])
@@ -42,7 +44,7 @@ def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
             logger.info(f"Successfully completed /manage-relationship: {rel_key}")
             return Response(code=200, body={"success": True, "relationshipId": rel_key})
         return Response(code=500, body={"error": "Failed to create relationship"})
-    except Exception as e:
+    except Exception:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Unexpected error"})
 
@@ -76,7 +78,10 @@ def get_relationship(request: Request, _: dict, logger: Logger) -> Response:
             links.append({"source": rel['rule_group_id'], "target": rel['host_group_id']})
 
         logger.info("Successfully completed /get-relationship")
-        return Response(code=200, body={"success": True, "relationship": relationship, "graphData": {"nodes": nodes, "links": links}, "pagination": result["pagination"]})
-    except Exception as e:
+        return Response(code=200, body={
+            "success": True, "relationship": relationship,
+            "graphData": {"nodes": nodes, "links": links}, "pagination": result["pagination"],
+        })
+    except Exception:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to fetch"})

@@ -5,16 +5,20 @@ This module provides functionality for managing URL blocking rules in CrowdStrik
 It delegates handling to specific modules in the `handlers` directory.
 """
 
-from crowdstrike.foundry.function import Request, Response
-from logging import Logger
 import traceback
+from logging import Logger
+
+from crowdstrike.foundry.function import Request, Response
+
 from app_core import FUNC, APP_VERSION
 
 # Import all handlers so they register their endpoints with FUNC
+# pylint: disable=unused-import
 import handlers.analytics
 import handlers.categories
 import handlers.policies
 import handlers.relationships
+# pylint: enable=unused-import
 
 @FUNC.handler(method='GET', path='/healthz')
 def healthz(request: Request, _: dict, logger: Logger) -> Response:
@@ -22,7 +26,7 @@ def healthz(request: Request, _: dict, logger: Logger) -> Response:
     logger.info("Starting /healthz handler")
     try:
         return Response(code=200, body={"status": "ok", "version": APP_VERSION})
-    except Exception as e:
+    except Exception:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Failed to run healthz"})
 

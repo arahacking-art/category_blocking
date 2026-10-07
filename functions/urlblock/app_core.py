@@ -26,7 +26,7 @@ def _current_token():
     if not callable(token_fn):
         return None
     try:
-        return token_fn() or None
+        return token_fn() or None  # pylint: disable=not-callable
     except Exception:
         return None
 

@@ -2,13 +2,13 @@ import csv
 import io
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
+from logging import Logger
+
 import pytz
 from crowdstrike.foundry.function import APIError, Request, Response
 from falconpy import CustomStorage
-from logging import Logger
-
-from concurrent.futures import ThreadPoolExecutor
 
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER
 from app_utils import (
@@ -79,7 +79,8 @@ def process_csv_records(csv_path=None, custom_storage=None, logger=None, collect
                 key = category_key(record["category"])
                 existing = keys_by_lower.setdefault(key.lower(), key)
                 if existing != key:
-                    raise ValueError(f"Category '{record['category']}' conflicts with existing key '{existing}' (differs only by case)")
+                    raise ValueError(f"Category '{record['category']}' conflicts with existing key "
+                                     f"'{existing}' (differs only by case)")
                 entry = categories_map.setdefault(key, {"category": record["category"], "domains": []})
                 entry["domains"] = _merge_domains(';'.join(entry["domains"]), ';'.join(domains))
             except ValueError as e:
@@ -114,7 +115,7 @@ def process_csv_records(csv_path=None, custom_storage=None, logger=None, collect
     domains_imported = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         futures = [(k, e, executor.submit(_put, k, e)) for k, e in categories_map.items()]
-        for key, entry, future in futures:
+        for _, entry, future in futures:
             try:
                 future.result()
                 success_count += 1
@@ -236,7 +237,7 @@ def search_categories(request: Request, _: dict, logger: Logger) -> Response:
     logger.info("Starting /search-categories handler")
     try:
         custom_storage = get_client(CustomStorage)
-        
+
         category = query_param(request, 'category').strip()
         if not category:
             return Response(code=400, errors=[APIError(code=400, message="Query parameter 'category' is required")])
@@ -309,9 +310,11 @@ def manage_category(request: Request, _: dict, logger: Logger) -> Response:
                 }
             )
 
-        return Response(code=500, body={"error": "Failed to process category", "details": response.get('body', {}).get('message', 'Unknown error')})
+        return Response(code=500, body={
+            "error": "Failed to process category",
+            "details": response.get('body', {}).get('message', 'Unknown error'),
+        })
 
-    except Exception as e:
+    except Exception:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Unexpected error occurred"})
-

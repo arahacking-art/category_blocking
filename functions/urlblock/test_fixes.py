@@ -5,7 +5,7 @@ from unittest.mock import MagicMock, patch
 
 from crowdstrike.foundry.function import Request, RequestParams
 
-import main  # noqa: F401
+import main  # noqa: F401  # pylint: disable=unused-import
 from app_utils import (
     category_key, relationship_key, validate_fqdn, _validate_falcon_response, _sanitize_url_list,
 )

@@ -1,10 +1,11 @@
 import traceback
 from datetime import datetime, timedelta
 from collections import defaultdict
+from logging import Logger
+
 import pytz
 from crowdstrike.foundry.function import Request, Response
 from falconpy import FirewallManagement
-from logging import Logger
 
 from app_core import FUNC, get_client
 

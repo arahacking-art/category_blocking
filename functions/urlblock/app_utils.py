@@ -1,5 +1,53 @@
 import re
 
+def category_key(category_name: str) -> str:
+    """Generate normalized, deterministic Custom Storage key for a category."""
+    return re.sub(r'[^a-z0-9_]', '_', category_name.strip().lower())
+
+
+def relationship_key(category_name: str, rule_group_id: str, host_group_id: str) -> str:
+    """Generate deterministic Custom Storage key for a relationship."""
+    return f"{category_key(category_name)}_{rule_group_id}_{host_group_id}"
+
+
+def validate_fqdn(fqdn: str) -> bool:
+    """Validate that a string looks like a valid FQDN or wildcard FQDN."""
+    pattern = r'^(\*\.)?([a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$'
+    return bool(re.match(pattern, fqdn.strip()))
+
+
+def _validate_falcon_response(response, operation_name: str, logger=None):
+    """Validate a FalconPy response. Returns (success: bool, error_message: str | None)."""
+    status = response.get("status_code", 0) if isinstance(response, dict) else 0
+    if status in (200, 201, 202, 204):
+        return True, None
+
+    body = response.get("body") if isinstance(response, dict) else None
+    errors = (body.get("errors") if isinstance(body, dict) else None) or []
+    if errors and isinstance(errors[0], dict):
+        error_msg = errors[0].get("message", "Unknown error from CrowdStrike")
+    else:
+        error_msg = f"CrowdStrike API returned status {status}"
+
+    if logger:
+        if 400 <= status < 500:
+            logger.warning(f"{operation_name} failed ({status}): {error_msg}")
+        else:
+            logger.error(f"{operation_name} failed ({status}): {error_msg}")
+
+    return False, error_msg
+
+
+def _get_username(config) -> str:
+    """Extract the authenticated username from the Foundry context (never from the request body)."""
+    if isinstance(config, dict):
+        user = config.get('user', {})
+        if isinstance(user, dict):
+            return user.get('username', '') or user.get('uuid', '') or 'unknown'
+        return config.get('username', '') or 'unknown'
+    return 'unknown'
+
+
 def _sanitize_url(url: str) -> str:
     """Strip whitespace, http(s):// protocol prefixes and trailing slashes."""
     url = url.strip()
@@ -9,14 +57,14 @@ def _sanitize_url(url: str) -> str:
 
 def _sanitize_url_list(raw: str, separator: str = ';') -> list:
     """
-    Split a separator-delimited URL string, sanitize each entry and
-    auto-generate *.domain wildcard variants.
+    Split a separator-delimited URL string, sanitize each entry, drop entries
+    that are not valid FQDNs and auto-generate *.domain wildcard variants.
     """
     seen: set = set()
     result: list = []
     for part in raw.split(separator):
         clean = _sanitize_url(part)
-        if not clean:
+        if not clean or not validate_fqdn(clean):
             continue
         if clean not in seen:
             seen.add(clean)

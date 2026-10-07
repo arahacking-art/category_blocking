@@ -6,10 +6,10 @@ from falconpy import CustomStorage
 from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_RELATION_VER
-from app_utils import paginated_search
+from app_utils import paginated_search, relationship_key, _get_username
 
 @FUNC.handler(method='POST', path='/manage-relationship')
-def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
+def manage_relationship(request: Request, config: dict, logger: Logger) -> Response:
     """Create or update relationship between category, rule group, and host."""
     logger.info("Starting /manage-relationship handler")
     try:
@@ -22,24 +22,25 @@ def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
             "host_group_name": request.body.get('host_group_name', ''),
             "policy_name": request.body.get('policy_name', ''),
             "created_at": request.body.get('created_at', datetime.now(pytz.UTC).isoformat()),
-            "created_by": request.body.get('created_by', 'unknown')
+            "created_by": _get_username(config)
         }
 
         required_fields = ['category_name', 'rule_group_id', 'host_group_id']
         missing_fields = [f for f in required_fields if not relationship_record[f]]
         if missing_fields: return Response(code=400, body={"error": "Missing required fields"})
 
-        relationship_key = f"{relationship_record['category_name']}_{relationship_record['rule_group_id']}_{relationship_record['host_group_id']}"
+        rel_key = relationship_key(
+            relationship_record['category_name'], relationship_record['rule_group_id'], relationship_record['host_group_id'])
         response = custom_storage.PutObjectByVersion(
             body=relationship_record,
             collection_name="relationship",
             collection_version=COLLECTION_RELATION_VER,
-            object_key=relationship_key
+            object_key=rel_key
         )
 
         if response.get('status_code') == 200:
-            logger.info(f"Successfully completed /manage-relationship: {relationship_key}")
-            return Response(code=200, body={"success": True, "relationshipId": relationship_key})
+            logger.info(f"Successfully completed /manage-relationship: {rel_key}")
+            return Response(code=200, body={"success": True, "relationshipId": rel_key})
         return Response(code=500, body={"error": "Failed to create relationship"})
     except Exception as e:
         logger.error(traceback.format_exc())

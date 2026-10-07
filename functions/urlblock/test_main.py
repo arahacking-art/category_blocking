@@ -91,7 +91,7 @@ class SearchCategoriesTestCase(HandlerTestCase):
         kwargs = self.api.GetVersionedObject.call_args.kwargs
         self.assertEqual(kwargs["collection_version"], "v2.0")
         self.assertEqual(kwargs["collection_name"], "domain")
-        self.assertEqual(kwargs["object_key"], "Games")
+        self.assertEqual(kwargs["object_key"], "games")
         self.api.GetObject.assert_not_called()
 
     def test_client_failure_returns_500(self):
@@ -198,11 +198,11 @@ class RelationshipTestCase(HandlerTestCase):
         resp = relationships.manage_relationship(req, None, self.logger)
 
         self.assertEqual(resp.code, 200)
-        self.assertEqual(resp.body["relationshipId"], "Games_rg-123_hg-456")
+        self.assertEqual(resp.body["relationshipId"], "games_rg-123_hg-456")
         kwargs = self.api.PutObjectByVersion.call_args.kwargs
         self.assertEqual(kwargs["collection_version"], "v5.0")
         self.assertEqual(kwargs["collection_name"], "relationship")
-        self.assertEqual(kwargs["object_key"], "Games_rg-123_hg-456")
+        self.assertEqual(kwargs["object_key"], "games_rg-123_hg-456")
 
     def test_manage_relationship_missing_fields(self):
         req = make_request({"category_name": "Games", "rule_group_id": "", "host_group_id": ""})
@@ -263,7 +263,7 @@ class ProcessCsvRecordsTestCase(unittest.TestCase):
 
         self.assertEqual(api.PutObjectByVersion.call_count, 2)
         keys = {c.kwargs["object_key"] for c in api.PutObjectByVersion.call_args_list}
-        self.assertEqual(keys, {"Games", "News"})
+        self.assertEqual(keys, {"games", "news"})
         for c in api.PutObjectByVersion.call_args_list:
             self.assertEqual(c.kwargs["collection_version"], "v2.0")
             self.assertEqual(c.kwargs["collection_name"], "domain")
@@ -291,7 +291,7 @@ class ProcessCsvRecordsTestCase(unittest.TestCase):
     def test_http_error_codes_count_as_failures(self):
         api = MagicMock()
         api.PutObjectByVersion.side_effect = lambda **kw: {
-            "status_code": 500 if kw["object_key"] == "News" else 200}
+            "status_code": 500 if kw["object_key"] == "news" else 200}
 
         results, logger = self.run_process(api)
 

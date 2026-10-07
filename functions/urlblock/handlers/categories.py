@@ -1,6 +1,6 @@
 import csv
+import io
 import json
-import os
 import time
 import traceback
 from datetime import datetime
@@ -12,7 +12,7 @@ from logging import Logger
 from concurrent.futures import ThreadPoolExecutor
 
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER
-from app_utils import _sanitize_url_list, paginated_search
+from app_utils import _sanitize_url_list, paginated_search, category_key
 
 # ---------------------------------------------------------------------------
 # CSV Helpers
@@ -37,34 +37,43 @@ def validate_record(record):
     if not record.get('domain'):
         raise ValueError("Missing required field: domain")
 
-def process_csv_records(csv_path, custom_storage, logger, collection_name="domain", collection_version=COLLECTION_DOMAIN_VER, max_workers=10):
-    """Process CSV records and write collection objects in parallel."""
+def process_csv_records(csv_path=None, custom_storage=None, logger=None, collection_name="domain",
+                        collection_version=COLLECTION_DOMAIN_VER, max_workers=10, csv_text=None):
+    """Process CSV records (from `csv_text` or the file at `csv_path`) and write collection objects in parallel."""
     error_count = 0
     total_rows = 0
     records = []
-    try:
-        with open(csv_path, 'r', encoding='utf-8') as file:
-            csv_reader = csv.reader(file)
-            next(csv_reader)  # Skip header row
-            for row in csv_reader:
-                total_rows += 1
-                try:
-                    if len(row) >= 2:
-                        record = transform_csv_row(row)
-                        validate_record(record)
-                        records.append(record)
-                except ValueError as e:
-                    error_count += 1
-                    logger.error(f"Error processing row {total_rows}: {str(e)}")
-    except IOError as e:
-        raise IOError(f"Error reading CSV file: {str(e)}") from e
+
+    def _read_rows(file):
+        nonlocal error_count, total_rows
+        csv_reader = csv.reader(file)
+        next(csv_reader, None)  # Skip header row
+        for row in csv_reader:
+            total_rows += 1
+            try:
+                if len(row) >= 2:
+                    record = transform_csv_row(row)
+                    validate_record(record)
+                    records.append(record)
+            except ValueError as e:
+                error_count += 1
+                logger.error(f"Error processing row {total_rows}: {str(e)}")
+
+    if csv_text is not None:
+        _read_rows(io.StringIO(csv_text))
+    else:
+        try:
+            with open(csv_path, 'r', encoding='utf-8') as file:
+                _read_rows(file)
+        except IOError as e:
+            raise IOError(f"Error reading CSV file: {str(e)}") from e
 
     def _put(record):
         resp = custom_storage.PutObjectByVersion(
             body=record,
             collection_name=collection_name,
             collection_version=collection_version,
-            object_key=record['category']
+            object_key=category_key(record['category'])
         )
         if isinstance(resp, dict) and resp.get('status_code', 200) >= 400:
             raise RuntimeError(f"HTTP {resp.get('status_code')}")
@@ -93,15 +102,17 @@ def process_csv_records(csv_path, custom_storage, logger, collection_name="domai
 
 @FUNC.handler(method='POST', path='/import-csv')
 def import_csv_handler(request: Request, _: dict, logger: Logger) -> Response:
-    """Import domain categorization CSV data into a Foundry Collection."""
+    """Import domain categorization CSV data (sent as text in `csv`) into a Foundry Collection."""
     logger.info("Starting /import-csv handler")
     try:
+        csv_text = request.body.get('csv') if request.body else None
+        if not isinstance(csv_text, str) or not csv_text.strip():
+            return Response(code=400, body={"error": "CSV content is required in the 'csv' field"})
+
         custom_storage = get_client(CustomStorage)
-        current_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        csv_file = os.path.join(current_dir, 'output.csv')
 
         results = process_csv_records(
-            csv_path=csv_file,
+            csv_text=csv_text,
             custom_storage=custom_storage,
             logger=logger,
             collection_name="domain",
@@ -115,7 +126,7 @@ def import_csv_handler(request: Request, _: dict, logger: Logger) -> Response:
                 "successful_imports": results["success_count"],
                 "failed_imports": results["error_count"],
                 "collection_name": "domain",
-                "source_file": csv_file,
+                "source_file": "request body",
                 "import_timestamp": int(time.time())
             },
             code=200
@@ -195,7 +206,7 @@ def search_categories(request: Request, _: dict, logger: Logger) -> Response:
         except Exception:
             category = ''
 
-        object_key = category.replace(' ', '_') if category else "Games"
+        object_key = category_key(category) if category else "games"
         response = custom_storage.GetVersionedObject(
             collection_name="domain",
             collection_version=COLLECTION_DOMAIN_VER,
@@ -234,6 +245,8 @@ def manage_category(request: Request, _: dict, logger: Logger) -> Response:
 
         custom_storage = get_client(CustomStorage)
         url_list = _sanitize_url_list(urls, separator=',')
+        if not url_list:
+            return Response(code=400, body={"error": "No valid URLs provided"})
 
         record = {
             "category": category_name,
@@ -246,7 +259,7 @@ def manage_category(request: Request, _: dict, logger: Logger) -> Response:
             body=record,
             collection_name="domain",
             collection_version=COLLECTION_DOMAIN_VER,
-            object_key=category_name.replace(' ', '_')
+            object_key=category_key(category_name)
         )
 
         if response.get('status_code') == 200:

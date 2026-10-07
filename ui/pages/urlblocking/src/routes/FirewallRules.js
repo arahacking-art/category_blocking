@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useContext, useRef } from 'react';
 import { FalconApiContext } from '../contexts/falcon-api-context';
+import { categoryKey } from '../utils/keys.js';
 import {
   SlButton,
   SlDialog,
@@ -110,13 +111,13 @@ function FirewallRules() {
   // Delete handler
   // ─────────────────────────────────────────────────────────────────────────
 
-  const handleDelete = async (ruleGroupId, policyName) => {
+  const handleDelete = async (ruleGroupId, policyName, policyId) => {
     if (!window.confirm(`¿Eliminar la política "${policyName}"? Esta acción no se puede deshacer.`)) {
       return;
     }
     setDeletingId(ruleGroupId);
     try {
-      await cf().path('/delete-policy').post({ rule_group_id: ruleGroupId });
+      await cf().path('/delete-policy').post({ rule_group_id: ruleGroupId, policy_id: policyId || '' });
       await loadPolicies();
     } catch (err) {
       console.error('handleDelete error:', err);
@@ -159,7 +160,7 @@ function FirewallRules() {
 
       await Promise.all(editCategories.map(async (cat) => {
         try {
-          const record = await collection.read(cat);
+          const record = await collection.read(categoryKey(cat));
           if (record?.domain) {
             categoriesPayload[cat] = record.domain;
           }
@@ -176,13 +177,13 @@ function FirewallRules() {
       // 2. Call update-policy
       const resp = await cf().path('/update-policy').post({
         ruleGroupId: editPolicy.rule_group_id,
+        policyId:    editPolicy.policy_id || '',
         policyName:  editPolicy.policy_name,
         hostGroupId: editPolicy.host_group_id,
         hostGroupName: editPolicy.host_group_name,
         platform:    editPolicy.platform,
         categories:  categoriesPayload,
         whitelist:   editWhitelist.trim(),
-        username:    falcon?.data?.user?.username || 'unknown',
       });
 
       setSaveStatus({ type: 'success', message: '¡Política actualizada exitosamente!' });
@@ -354,7 +355,7 @@ function FirewallRules() {
                       size="small"
                       variant="danger"
                       loading={deletingId === pol.rule_group_id}
-                      onClick={() => handleDelete(pol.rule_group_id, pol.policy_name)}
+                      onClick={() => handleDelete(pol.rule_group_id, pol.policy_name, pol.policy_id)}
                     >
                       🗑 Delete
                     </SlButton>

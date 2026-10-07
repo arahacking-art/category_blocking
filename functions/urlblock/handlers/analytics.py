@@ -40,8 +40,15 @@ def get_domain_analytics(request: Request, _: dict, logger: Logger) -> Response:
 
         offset = 0
         limit = 500
+        max_pages = 20  # cap: 10,000 events per request
+        pages = 0
+        truncated = False
 
         while True:
+            if pages >= max_pages:
+                truncated = True
+                break
+            pages += 1
             try:
                 query_response = firewall_mgmt.query_events(parameters={
                     'filter': time_filter,
@@ -50,12 +57,17 @@ def get_domain_analytics(request: Request, _: dict, logger: Logger) -> Response:
                     'sort': 'timestamp.desc'
                 })
 
-                if query_response['status_code'] != 200 or not query_response['body']['resources']:
+                if query_response['status_code'] != 200:
+                    truncated = True
+                    break
+                if not query_response['body']['resources']:
                     break
 
                 event_ids = query_response['body']['resources']
                 events_response = firewall_mgmt.get_events(ids=event_ids)
 
+                if events_response['status_code'] != 200:
+                    truncated = True
                 if events_response['status_code'] == 200:
                     for event in events_response['body']['resources']:
                         if 'domain_name_list' not in event:
@@ -98,6 +110,7 @@ def get_domain_analytics(request: Request, _: dict, logger: Logger) -> Response:
 
             except Exception as e:
                 logger.error(f"Error fetching events batch: {str(e)}")
+                truncated = True
                 break
 
         logger.info(f"Total unique domains aggregated: {len(domain_visits)}")
@@ -138,7 +151,9 @@ def get_domain_analytics(request: Request, _: dict, logger: Logger) -> Response:
             code=200,
             body={
                 'analysis': domain_analysis,
-                'visualization_data': visualization_data
+                'visualization_data': visualization_data,
+                'truncated': truncated,
+                'message': "Results may be incomplete" if truncated else None
             }
         )
 

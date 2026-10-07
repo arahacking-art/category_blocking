@@ -1,5 +1,6 @@
 import React, { useContext, useState, useEffect } from "react";
 import { FalconApiContext } from "../contexts/falcon-api-context";
+import { categoryKey } from "../utils/keys.js";
 import { Link } from '../components/link';
 import { SlSpinner, SlSelect, SlOption, SlButton, SlCheckbox, SlTextarea, SlAlert } from '@shoelace-style/shoelace/dist/react';
 import '@shoelace-style/shoelace/dist/themes/light.css';
@@ -116,7 +117,7 @@ function Home() {
       // FASE 5: Fetch URLs per category and keep them separate for the new payload format
       const urlPromises = selectedCategories.map(async (category) => {
         try {
-          const objectKey = category;
+          const objectKey = categoryKey(category);
           console.log(`Fetching domains for category: ${category}, key: ${objectKey}`);
 
           const record = await collection.read(objectKey);
@@ -202,8 +203,7 @@ function Home() {
         policyName: policyName,
         platform: platform.toLowerCase(),
         categories: categoriesPayload,
-        whitelist: whitelist.trim(),
-        username: falcon?.data?.user?.username || 'unknown'
+        whitelist: whitelist.trim()
       });
 
       setStatus({

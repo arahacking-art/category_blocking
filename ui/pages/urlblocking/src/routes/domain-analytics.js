@@ -89,6 +89,12 @@ function DomainAnalytics() {
         <div className="container mx-auto p-4">
             <h2 className="text-lg font-semibold text-left mb-4">Domain access analysis</h2>
 
+            {analyticsData.truncated && (
+                <SlAlert variant="warning" open className="mb-4">
+                    {analyticsData.message || 'Results may be incomplete'}
+                </SlAlert>
+            )}
+
             <SlCard>
                 <div slot="header">
                     <h3 className="text-lg font-semibold text-left">Top 20 Most Visited Domains (Last 15 Days)</h3>

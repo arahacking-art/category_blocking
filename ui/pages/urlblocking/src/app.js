@@ -40,7 +40,7 @@ function Root() {
 }
 
 function App() {
-  const { falcon, navigation, isInitialized } = useFalconApiContext();
+  const { falcon, navigation, isInitialized, cachedCategories, refreshCategories } = useFalconApiContext();
 
   if (!isInitialized) {
     return (
@@ -55,7 +55,7 @@ function App() {
 
   return (
     <React.StrictMode>
-      <FalconApiContext.Provider value={{ falcon, navigation, isInitialized }}>
+      <FalconApiContext.Provider value={{ falcon, navigation, isInitialized, cachedCategories, refreshCategories }}>
         <HashRouter>
           <Root />
         </HashRouter>

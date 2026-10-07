@@ -30,6 +30,8 @@ function DataTable({ headers, rows }) {
     );
 }
 
+const formatDate = (value) => (value ? new Date(value).toLocaleString() : '-');
+
 function DomainAnalytics() {
     const { falcon, isInitialized } = useFalconApiContext();
     const [analyticsData, setAnalyticsData] = useState(null);
@@ -130,8 +132,8 @@ function DomainAnalytics() {
                         data.visit_count,
                         data.unique_ips,
                         data.unique_hosts,
-                        new Date(data.first_seen).toLocaleString(),
-                        new Date(data.last_seen).toLocaleString(),
+                        formatDate(data.first_seen),
+                        formatDate(data.last_seen),
                     ])}
                 />
             </SlCard>

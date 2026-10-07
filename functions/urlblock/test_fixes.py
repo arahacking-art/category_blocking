@@ -23,11 +23,12 @@ def falcon_ok(resources):
 
 class KeyHelpersTestCase(unittest.TestCase):
     def test_category_key_normalizes(self):
-        self.assertEqual(category_key(" Social Media "), "social_media")
-        self.assertEqual(category_key("Games"), category_key("games"))
+        self.assertEqual(category_key(" Social Media "), "Social_Media")
+        self.assertEqual(category_key("AI_Applications"), "AI_Applications")  # legacy keys unchanged
+        self.assertNotEqual(category_key("Games"), category_key("games"))
 
     def test_relationship_key_is_deterministic(self):
-        self.assertEqual(relationship_key("Social Media", "rg", "hg"), "social_media_rg_hg")
+        self.assertEqual(relationship_key("Social Media", "rg", "hg"), "Social_Media_rg_hg")
 
     def test_validate_fqdn(self):
         for good in ("a.com", "*.a.com", "sub-d.example.co.uk"):
@@ -91,7 +92,7 @@ class PolicyTestCase(unittest.TestCase):
         kwargs = self.store.PutObjectByVersion.call_args.kwargs
         self.assertEqual(kwargs["body"]["policy_id"], "pol-new")
         self.assertEqual(kwargs["body"]["created_by"], "ana")
-        self.assertEqual(kwargs["object_key"], "games_rg-new_hg1")
+        self.assertEqual(kwargs["object_key"], "Games_rg-new_hg1")
 
     def test_create_rule_policy_conflict_returns_falcon_error(self):
         self.pol.create_policies.return_value = {
@@ -272,7 +273,68 @@ class ImportCsvHandlerTestCase(unittest.TestCase):
                 req({"csv": "category,url\nSocial Media,a.com;*.a.com\n"}), {}, MagicMock())
         self.assertEqual(resp.code, 200)
         self.assertEqual(resp.body["successful_imports"], 1)
-        self.assertEqual(api.PutObjectByVersion.call_args.kwargs["object_key"], "social_media")
+        self.assertEqual(api.PutObjectByVersion.call_args.kwargs["object_key"], "Social_Media")
+
+
+class CsvAggregationTestCase(unittest.TestCase):
+    def run_csv(self, text):
+        api = MagicMock()
+        api.PutObjectByVersion.return_value = OK
+        with patch.object(categories, "get_client", return_value=api):
+            resp = categories.import_csv_handler(req({"csv": text}), {}, MagicMock())
+        return resp, api
+
+    def test_one_row_per_domain_is_merged_per_category(self):
+        resp, api = self.run_csv(
+            "category,url\nAI Apps,openai.com\nAI Apps,claude.ai\nGames,steam.com\nAI Apps,openai.com\n")
+        self.assertEqual(resp.body["total_rows"], 4)
+        self.assertEqual(resp.body["successful_imports"], 2)
+        self.assertEqual(resp.body["failed_imports"], 0)
+        by_key = {c.kwargs["object_key"]: c.kwargs["body"] for c in api.PutObjectByVersion.call_args_list}
+        self.assertEqual(set(by_key), {"AI_Apps", "Games"})
+        self.assertEqual(by_key["AI_Apps"]["category"], "AI Apps")
+        self.assertEqual(by_key["AI_Apps"]["domain"].split(";"),
+                         ["openai.com", "*.openai.com", "claude.ai", "*.claude.ai"])
+        self.assertEqual(resp.body["domains_imported"], 6)
+
+    def test_header_is_optional_and_invalid_rows_are_counted(self):
+        resp, api = self.run_csv("Games,steam.com\nGames,not a domain\n,x.com\n")
+        self.assertEqual(resp.body["successful_imports"], 1)
+        self.assertEqual(resp.body["failed_imports"], 2)
+        self.assertEqual(api.PutObjectByVersion.call_count, 1)
+
+
+class CategoryCaseConflictTestCase(unittest.TestCase):
+    def test_manage_category_rejects_key_differing_only_by_case(self):
+        api = MagicMock()
+        api.SearchObjects.return_value = {"status_code": 200, "resources": [{"_key": "AI_Apps"}]}
+        with patch.object(categories, "get_client", return_value=api):
+            resp = categories.manage_category(
+                req({"categoryName": "ai apps", "urls": "a.com"}), {}, MagicMock())
+        self.assertEqual(resp.code, 409)
+        self.assertIn("AI_Apps", resp.body["error"])
+        api.PutObjectByVersion.assert_not_called()
+
+    def test_manage_category_updates_existing_exact_key(self):
+        api = MagicMock()
+        api.SearchObjects.return_value = {"status_code": 200, "resources": [{"_key": "AI_Applications"}]}
+        api.PutObjectByVersion.return_value = OK
+        with patch.object(categories, "get_client", return_value=api):
+            resp = categories.manage_category(
+                req({"categoryName": "AI Applications", "urls": "a.com"}), {}, MagicMock())
+        self.assertEqual(resp.code, 200)
+        self.assertEqual(api.PutObjectByVersion.call_args.kwargs["object_key"], "AI_Applications")
+
+    def test_import_keeps_legacy_keys_and_flags_case_conflicts(self):
+        api = MagicMock()
+        api.SearchObjects.return_value = {"status_code": 200, "resources": [{"_key": "AI_Applications"}]}
+        api.PutObjectByVersion.return_value = OK
+        csv_text = "category,url\nAI_Applications,a.com\nai applications,b.com\nGames,c.com\n"
+        with patch.object(categories, "get_client", return_value=api):
+            resp = categories.import_csv_handler(req({"csv": csv_text}), {}, MagicMock())
+        keys = {c.kwargs["object_key"] for c in api.PutObjectByVersion.call_args_list}
+        self.assertEqual(keys, {"AI_Applications", "Games"})
+        self.assertEqual(resp.body["failed_imports"], 1)
 
 
 class AnalyticsTruncatedTestCase(unittest.TestCase):

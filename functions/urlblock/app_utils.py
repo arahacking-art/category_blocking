@@ -1,8 +1,12 @@
 import re
 
 def category_key(category_name: str) -> str:
-    """Generate normalized, deterministic Custom Storage key for a category."""
-    return re.sub(r'[^a-z0-9_]', '_', category_name.strip().lower())
+    """
+    Deterministic Custom Storage key for a category. Case is preserved so keys created by
+    earlier versions (e.g. 'AI_Applications') keep working; only characters other than
+    letters, digits and '_' (spaces included) become '_'.
+    """
+    return re.sub(r'[^A-Za-z0-9_]', '_', category_name.strip())
 
 
 def relationship_key(category_name: str, rule_group_id: str, host_group_id: str) -> str:

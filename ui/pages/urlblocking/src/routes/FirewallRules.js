@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useContext, useRef } from 'react';
 import { FalconApiContext } from '../contexts/falcon-api-context';
 import { categoryKey } from '../utils/keys.js';
+import { fetchCategoryNames } from '../utils/categories.js';
 import {
   SlButton,
   SlDialog,
@@ -97,10 +98,7 @@ function FirewallRules() {
       if (cachedCategories && cachedCategories.length > 0) {
         setAllCategories(cachedCategories);
       } else {
-        const collection = falcon.collection({ collection: 'domain' });
-        const resp = await collection.list({ limit: 200 });
-        const keys = resp?.resources ?? [];
-        setAllCategories(keys.map(k => typeof k === 'string' ? k : k.category).filter(Boolean));
+        setAllCategories(await fetchCategoryNames(falcon));
       }
     } catch (err) {
       console.error('loadAllCategories error:', err);

@@ -18,18 +18,6 @@ from app_utils import _sanitize_url_list, paginated_search, category_key
 # CSV Helpers
 # ---------------------------------------------------------------------------
 
-def transform_csv_row(row):
-    """Transform a CSV row to match the Collection schema."""
-    category = row[0].strip()
-    urls = row[1]
-    record = {
-        "category": category,
-        "domain": urls,
-        "wildcard_domain": "",
-        "imported_at": int(time.time())
-    }
-    return record
-
 def validate_record(record):
     """Validate that record meets schema requirements."""
     if not record.get('category'):
@@ -37,24 +25,63 @@ def validate_record(record):
     if not record.get('domain'):
         raise ValueError("Missing required field: domain")
 
+
+def _existing_keys(custom_storage):
+    """All object keys currently in the domain collection (empty list if it cannot be read)."""
+    result = paginated_search(custom_storage, 'domain', COLLECTION_DOMAIN_VER, page_size=500, max_pages=100)
+    if "error" in result:
+        return []
+    return [r['_key'] for r in result['resources'] if r.get('_key')]
+
+
+def _merge_domains(*domain_strings):
+    """Union of ';'-separated domain strings, preserving first-seen order."""
+    seen, merged = set(), []
+    for value in domain_strings:
+        for d in (value or '').split(';'):
+            d = d.strip()
+            if d and d not in seen:
+                seen.add(d)
+                merged.append(d)
+    return merged
+
+
 def process_csv_records(csv_path=None, custom_storage=None, logger=None, collection_name="domain",
                         collection_version=COLLECTION_DOMAIN_VER, max_workers=10, csv_text=None):
-    """Process CSV records (from `csv_text` or the file at `csv_path`) and write collection objects in parallel."""
+    """
+    Process a `category,url` CSV (one row per domain, rows may also hold ';'-separated lists)
+    and write ONE collection object per category, in parallel.
+
+    Rows are grouped by normalized category key; domains are validated, de-duplicated and
+    get their *.domain wildcard. Returns row, category, domain and error counts.
+    """
     error_count = 0
     total_rows = 0
-    records = []
+    categories_map = {}  # category_key -> {"category": display name, "domains": [..]}
+    # lower-cased key -> actual key: keys that differ only by case are treated as conflicts
+    keys_by_lower = {k.lower(): k for k in _existing_keys(custom_storage)} if custom_storage else {}
 
     def _read_rows(file):
         nonlocal error_count, total_rows
         csv_reader = csv.reader(file)
-        next(csv_reader, None)  # Skip header row
-        for row in csv_reader:
+        for index, row in enumerate(csv_reader):
+            if index == 0 and row and row[0].strip().lower().lstrip('\ufeff') == 'category':
+                continue  # header row
             total_rows += 1
             try:
-                if len(row) >= 2:
-                    record = transform_csv_row(row)
-                    validate_record(record)
-                    records.append(record)
+                if len(row) < 2:
+                    continue
+                record = {"category": row[0].strip(), "domain": row[1].strip()}
+                validate_record(record)
+                domains = _sanitize_url_list(record["domain"], separator=';')
+                if not domains:
+                    raise ValueError(f"No valid domain in '{record['domain']}'")
+                key = category_key(record["category"])
+                existing = keys_by_lower.setdefault(key.lower(), key)
+                if existing != key:
+                    raise ValueError(f"Category '{record['category']}' conflicts with existing key '{existing}' (differs only by case)")
+                entry = categories_map.setdefault(key, {"category": record["category"], "domains": []})
+                entry["domains"] = _merge_domains(';'.join(entry["domains"]), ';'.join(domains))
             except ValueError as e:
                 error_count += 1
                 logger.error(f"Error processing row {total_rows}: {str(e)}")
@@ -68,30 +95,38 @@ def process_csv_records(csv_path=None, custom_storage=None, logger=None, collect
         except IOError as e:
             raise IOError(f"Error reading CSV file: {str(e)}") from e
 
-    def _put(record):
+    def _put(key, entry):
         resp = custom_storage.PutObjectByVersion(
-            body=record,
+            body={
+                "category": entry["category"],
+                "domain": ';'.join(entry["domains"]),
+                "wildcard_domain": "",
+                "imported_at": int(time.time())
+            },
             collection_name=collection_name,
             collection_version=collection_version,
-            object_key=category_key(record['category'])
+            object_key=key
         )
         if isinstance(resp, dict) and resp.get('status_code', 200) >= 400:
             raise RuntimeError(f"HTTP {resp.get('status_code')}")
 
     success_count = 0
+    domains_imported = 0
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = [(r, executor.submit(_put, r)) for r in records]
-        for record, future in futures:
+        futures = [(k, e, executor.submit(_put, k, e)) for k, e in categories_map.items()]
+        for key, entry, future in futures:
             try:
                 future.result()
                 success_count += 1
+                domains_imported += len(entry["domains"])
             except Exception as e:
                 error_count += 1
-                logger.error(f"Error writing category {record['category']}: {str(e)}")
+                logger.error(f"Error writing category {entry['category']}: {str(e)}")
 
     return {
         "total_rows": total_rows,
         "success_count": success_count,
+        "domains_imported": domains_imported,
         "error_count": error_count
     }
 
@@ -124,6 +159,7 @@ def import_csv_handler(request: Request, _: dict, logger: Logger) -> Response:
                 "success": True,
                 "total_rows": results["total_rows"],
                 "successful_imports": results["success_count"],
+                "domains_imported": results["domains_imported"],
                 "failed_imports": results["error_count"],
                 "collection_name": "domain",
                 "source_file": "request body",
@@ -206,7 +242,7 @@ def search_categories(request: Request, _: dict, logger: Logger) -> Response:
         except Exception:
             category = ''
 
-        object_key = category_key(category) if category else "games"
+        object_key = category_key(category) if category else "Games"
         response = custom_storage.GetVersionedObject(
             collection_name="domain",
             collection_version=COLLECTION_DOMAIN_VER,
@@ -248,6 +284,11 @@ def manage_category(request: Request, _: dict, logger: Logger) -> Response:
         if not url_list:
             return Response(code=400, body={"error": "No valid URLs provided"})
 
+        key = category_key(category_name)
+        conflict = next((k for k in _existing_keys(custom_storage) if k.lower() == key.lower() and k != key), None)
+        if conflict:
+            return Response(code=409, body={"error": f"A category with a similar name already exists: '{conflict}'"})
+
         record = {
             "category": category_name,
             "domain": ';'.join(url_list),
@@ -259,7 +300,7 @@ def manage_category(request: Request, _: dict, logger: Logger) -> Response:
             body=record,
             collection_name="domain",
             collection_version=COLLECTION_DOMAIN_VER,
-            object_key=category_key(category_name)
+            object_key=key
         )
 
         if response.get('status_code') == 200:
@@ -280,3 +321,4 @@ def manage_category(request: Request, _: dict, logger: Logger) -> Response:
     except Exception as e:
         logger.error(traceback.format_exc())
         return Response(code=500, body={"error": "Unexpected error occurred"})
+

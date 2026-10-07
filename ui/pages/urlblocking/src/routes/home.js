@@ -1,6 +1,7 @@
 import React, { useContext, useState, useEffect } from "react";
 import { FalconApiContext } from "../contexts/falcon-api-context";
 import { categoryKey } from "../utils/keys.js";
+import { fetchCategoryNames } from "../utils/categories.js";
 import { Link } from '../components/link';
 import { SlSpinner, SlSelect, SlOption, SlButton, SlCheckbox, SlTextarea, SlAlert } from '@shoelace-style/shoelace/dist/react';
 import '@shoelace-style/shoelace/dist/themes/light.css';
@@ -68,16 +69,10 @@ function Home() {
           setCategories(categoriesObj);
         } else {
           // Fallback to fetch
-          const collection = falcon.collection({ collection: 'domain' });
-          const response = await collection.list({ limit: 100 });
-          if (response?.resources) {
-            const categoriesObj = {};
-            response.resources.forEach(category => {
-              const catName = typeof category === 'string' ? category : category.category;
-              if (catName) categoriesObj[catName] = '';
-            });
-            setCategories(categoriesObj);
-          }
+          const names = await fetchCategoryNames(falcon);
+          const categoriesObj = {};
+          names.forEach(name => { categoriesObj[name] = ''; });
+          setCategories(categoriesObj);
         }
 
       } catch (error) {

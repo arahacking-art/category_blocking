@@ -1,4 +1,6 @@
+import json
 import re
+from concurrent.futures import ThreadPoolExecutor
 
 def category_key(category_name: str) -> str:
     """
@@ -42,19 +44,53 @@ def _validate_falcon_response(response, operation_name: str, logger=None):
     return False, error_msg
 
 
-def _get_username(config) -> str:
-    """Extract the authenticated username from the Foundry context (never from the request body)."""
-    if isinstance(config, dict):
-        user = config.get('user', {})
-        if isinstance(user, dict):
-            return user.get('username', '') or user.get('uuid', '') or 'unknown'
-        return config.get('username', '') or 'unknown'
+def query_param(request, name: str, default: str = '') -> str:
+    """
+    Read a query-string parameter. The Foundry SDK delivers them as
+    request.params.query = {"name": ["value", ...]}; the first value is returned.
+    """
+    params = getattr(request, 'params', None)
+    query = params.get('query') if isinstance(params, dict) else getattr(params, 'query', None)
+    if not isinstance(query, dict):
+        return default
+    value = query.get(name)
+    if isinstance(value, (list, tuple)):
+        value = value[0] if value else None
+    return default if value is None else str(value)
+
+
+_USERNAME_FIELDS = ('username', 'user_name', 'email', 'user_email', 'user_id', 'user_uuid', 'uuid')
+
+
+def _get_username(request) -> str:
+    """
+    Authenticated user from the Foundry request context (never from the request body).
+    The handler's second argument is the static app config and never carries the user.
+    """
+    context = getattr(request, 'context', None)
+    if not isinstance(context, dict):
+        return 'unknown'
+    for container in (context.get('user'), context.get('user_info'), context):
+        if isinstance(container, dict):
+            for field in _USERNAME_FIELDS:
+                value = container.get(field)
+                if value:
+                    return str(value)
     return 'unknown'
+
+
+def safe_context(request) -> dict:
+    """Request context without token-like values, for diagnostic logging."""
+    context = getattr(request, 'context', None)
+    if not isinstance(context, dict):
+        return {}
+    return {k: ('<redacted>' if 'token' in str(k).lower() or 'secret' in str(k).lower() else v)
+            for k, v in context.items()}
 
 
 def _sanitize_url(url: str) -> str:
     """Strip whitespace, http(s):// protocol prefixes and trailing slashes."""
-    url = url.strip()
+    url = url.strip().lower()
     url = re.sub(r'^https?://', '', url)
     url = url.rstrip('/')
     return url
@@ -111,70 +147,160 @@ def _build_rule(name: str, action: str, fqdn: str, temp_id: str,
     }
 
 
-def paginated_search(custom_storage, collection_name: str, collection_version: str,
-                     page_size: int = 100, max_pages: int = 10,
-                     filter: str = None, stop_when=None) -> dict:
-    """
-    Read a collection page by page using the SearchObjects `start` cursor.
+# ---------------------------------------------------------------------------
+# Custom Storage access
+#
+# SearchObjects/SearchObjectsByVersion only return object METADATA (and require
+# an FQL filter), so collections are read by listing keys with
+# ListObjectsByVersion (paged with the `start` key cursor) and fetching each
+# object with GetVersionedObject. FalconPy wraps JSON responses as
+# {"status_code", "headers", "body": {...}}.
+# ---------------------------------------------------------------------------
 
-    `stop_when(item)` (optional) is evaluated per item; the scan ends as soon
-    as it returns True and that item is returned in `match`.
+class StorageError(Exception):
+    """A Custom Storage call returned an error."""
 
-    Returns {"resources", "match", "pagination"} or {"error"} on API failure.
+
+def _iter_key_pages(custom_storage, collection_name, collection_version, page_size, max_pages, state):
+    """Yield pages of object keys. Fills `state` with pagination info (or 'error')."""
+    seen: set = set()
+    start = None
+    state.update(pages_fetched=0, returned=0, has_more=False)
+    while state["pages_fetched"] < max_pages:
+        kwargs = {"collection_name": collection_name, "collection_version": collection_version,
+                  "limit": page_size}
+        if start:
+            kwargs["start"] = start
+        resp = custom_storage.ListObjectsByVersion(**kwargs)
+        if not isinstance(resp, dict) or resp.get("status_code") != 200:
+            state["error"] = resp
+            return
+        state["pages_fetched"] += 1
+
+        body = resp.get("body") if isinstance(resp.get("body"), dict) else {}
+        raw = []
+        for item in body.get("resources") or []:
+            key = item if isinstance(item, str) else (
+                item.get("key") or item.get("object_key") if isinstance(item, dict) else None)
+            if key:
+                raw.append(key)
+
+        # `start` may be inclusive (or ignored): only keys not seen before count
+        new = [k for k in raw if k not in seen]
+        seen.update(new)
+        state["returned"] += len(new)
+        state["has_more"] = len(raw) >= page_size and bool(new)
+        if new:
+            yield new
+        if not state["has_more"]:
+            return
+        start = raw[-1]
+
+
+def _pagination(state, page_size):
+    return {
+        "page_size": page_size,
+        "pages_fetched": state["pages_fetched"],
+        "returned": state["returned"],
+        "has_more": state["has_more"],
+        "truncated": state["has_more"],
+    }
+
+
+def list_object_keys(custom_storage, collection_name: str, collection_version: str,
+                     page_size: int = 200, max_pages: int = 50) -> dict:
+    """All object keys of a collection: {"keys", "pagination"} or {"error"}."""
+    state: dict = {}
+    keys = [k for page in _iter_key_pages(custom_storage, collection_name, collection_version,
+                                          page_size, max_pages, state) for k in page]
+    if "error" in state:
+        return {"error": state["error"]}
+    return {"keys": keys, "pagination": _pagination(state, page_size)}
+
+
+def parse_object_response(resp):
     """
+    Decode a GetVersionedObject response: raw bytes, or a FalconPy dict whose body is
+    the object (JSON content type) or bytes. Returns the object, None when it does
+    not exist (404), or raises StorageError.
+    """
+    if isinstance(resp, (bytes, bytearray)):
+        return json.loads(resp.decode("utf-8"))
+    if isinstance(resp, dict):
+        status = resp.get("status_code")
+        if status == 404:
+            return None
+        if status != 200:
+            raise StorageError(f"HTTP {status}: {resp.get('body')}")
+        body = resp.get("body")
+        if isinstance(body, (bytes, bytearray)):
+            return json.loads(body.decode("utf-8"))
+        if isinstance(body, dict):
+            return body
+    raise StorageError(f"Unexpected response type: {type(resp).__name__}")
+
+
+def get_object(custom_storage, collection_name: str, collection_version: str, object_key: str):
+    """Fetch one object (dict), or None if it does not exist. Raises StorageError."""
+    resp = custom_storage.GetVersionedObject(collection_name=collection_name,
+                                             collection_version=collection_version,
+                                             object_key=object_key)
+    return parse_object_response(resp)
+
+
+def delete_object(custom_storage, collection_name: str, collection_version: str, object_key: str) -> bool:
+    """Delete one object; True on success."""
+    resp = custom_storage.DeleteVersionedObject(collection_name=collection_name,
+                                                collection_version=collection_version,
+                                                object_key=object_key)
+    return isinstance(resp, dict) and resp.get("status_code") in (200, 204)
+
+
+def read_all_objects(custom_storage, collection_name: str, collection_version: str,
+                     page_size: int = 200, max_pages: int = 50, max_workers: int = 10,
+                     stop_when=None, logger=None) -> dict:
+    """
+    Read every object of a collection (each gets its key in `_key`).
+
+    `stop_when(item)` (optional) ends the scan at the first matching item, returned in `match`.
+    Returns {"resources", "match", "failed", "pagination"} or {"error"}.
+    """
+    state: dict = {}
     resources: list = []
     match = None
-    cursor = None
-    pages = 0
-    has_more = False
+    failed = 0
 
-    while pages < max_pages:
-        kwargs = {
-            "collection_name": collection_name,
-            "collection_version": collection_version,
-            "limit": page_size,
-        }
-        if filter:
-            kwargs["filter"] = filter
-        if cursor:
-            kwargs["start"] = cursor
+    def _fetch(key):
+        obj = get_object(custom_storage, collection_name, collection_version, key)
+        if isinstance(obj, dict):
+            obj = dict(obj)
+            obj["_key"] = key
+        return obj
 
-        response = custom_storage.SearchObjects(**kwargs)
-        if not response or response.get("status_code", 200) != 200:
-            return {"error": response}
-        pages += 1
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        for keys in _iter_key_pages(custom_storage, collection_name, collection_version,
+                                    page_size, max_pages, state):
+            futures = [(k, executor.submit(_fetch, k)) for k in keys]
+            page = []
+            for key, future in futures:
+                try:
+                    obj = future.result()
+                except Exception as e:
+                    failed += 1
+                    if logger:
+                        logger.warning(f"Could not read {collection_name}/{key}: {e}")
+                    continue
+                if isinstance(obj, dict):
+                    page.append(obj)
+            resources.extend(page)
+            if stop_when:
+                match = next((r for r in page if stop_when(r)), None)
+                if match is not None:
+                    break
 
-        page = [r for r in response.get("resources", []) if isinstance(r, dict)]
-        # `start` may be inclusive: drop the item the cursor points at
-        if cursor and page and page[0].get("_key") == cursor:
-            page = page[1:]
-        resources.extend(page)
-
-        if stop_when:
-            found = next((r for r in page if stop_when(r)), None)
-            if found is not None:
-                match = found
-                has_more = False
-                break
-
-        # Cursor for the next page: API-provided offset, else last object key
-        body = response.get("body")
-        meta = response.get("meta") or (body.get("meta") if isinstance(body, dict) else None) or {}
-        next_cursor = (meta.get("pagination") or {}).get("next") or (page[-1].get("_key") if page else None)
-        has_more = len(page) >= page_size and bool(next_cursor) and next_cursor != cursor
-        if not has_more:
-            break
-        cursor = next_cursor
-
-    return {
-        "resources": resources,
-        "match": match,
-        "pagination": {
-            "page_size": page_size,
-            "pages_fetched": pages,
-            "returned": len(resources),
-            "has_more": has_more,
-            "next_cursor": cursor if has_more else None,
-            "truncated": has_more,
-        },
-    }
+    if "error" in state:
+        return {"error": state["error"]}
+    pagination = _pagination(state, page_size)
+    if match is not None:
+        pagination["has_more"] = pagination["truncated"] = False
+    return {"resources": resources, "match": match, "failed": failed, "pagination": pagination}

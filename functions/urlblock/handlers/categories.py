@@ -1,6 +1,5 @@
 import csv
 import io
-import json
 import time
 import traceback
 from datetime import datetime
@@ -12,7 +11,10 @@ from logging import Logger
 from concurrent.futures import ThreadPoolExecutor
 
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER
-from app_utils import _sanitize_url_list, paginated_search, category_key
+from app_utils import (
+    _sanitize_url_list, category_key, query_param,
+    list_object_keys, read_all_objects, get_object, StorageError,
+)
 
 # ---------------------------------------------------------------------------
 # CSV Helpers
@@ -28,10 +30,8 @@ def validate_record(record):
 
 def _existing_keys(custom_storage):
     """All object keys currently in the domain collection (empty list if it cannot be read)."""
-    result = paginated_search(custom_storage, 'domain', COLLECTION_DOMAIN_VER, page_size=500, max_pages=100)
-    if "error" in result:
-        return []
-    return [r['_key'] for r in result['resources'] if r.get('_key')]
+    result = list_object_keys(custom_storage, 'domain', COLLECTION_DOMAIN_VER)
+    return [] if "error" in result else result["keys"]
 
 
 def _merge_domains(*domain_strings):
@@ -182,18 +182,18 @@ def list_categories(request: Request, _: dict, logger: Logger) -> Response:
     try:
         custom_storage = get_client(CustomStorage)
         try:
-            page_size = min(int(request.params.limit), 500) if hasattr(request.params, 'limit') else 100
-        except (ValueError, AttributeError, TypeError):
-            page_size = 100
+            page_size = max(1, min(int(query_param(request, 'limit', '200')), 500))
+        except ValueError:
+            page_size = 200
         try:
-            max_pages = max(1, int(request.params.max_pages)) if hasattr(request.params, 'max_pages') else 10
-        except (ValueError, AttributeError, TypeError):
-            max_pages = 10
+            max_pages = max(1, int(query_param(request, 'max_pages', '50')))
+        except ValueError:
+            max_pages = 50
 
-        result = paginated_search(custom_storage, 'domain', COLLECTION_DOMAIN_VER,
-                                  page_size=page_size, max_pages=max_pages)
+        result = read_all_objects(custom_storage, 'domain', COLLECTION_DOMAIN_VER,
+                                  page_size=page_size, max_pages=max_pages, logger=logger)
         if "error" in result:
-            return Response(code=400, errors=[APIError(code=400, message=f"API Error: {result['error']}")])
+            return Response(code=500, errors=[APIError(code=500, message=f"API Error: {result['error']}")])
 
         resources = result['resources']
         categories = set()
@@ -220,7 +220,8 @@ def list_categories(request: Request, _: dict, logger: Logger) -> Response:
                 "categories": sorted(list(categories)),
                 "domains": domains,
                 "metadata": {"limit": page_size, "timestamp": int(time.time())},
-                "pagination": result["pagination"]
+                "pagination": result["pagination"],
+                "failed_reads": result["failed"]
             },
             code=200
         )
@@ -236,24 +237,16 @@ def search_categories(request: Request, _: dict, logger: Logger) -> Response:
     try:
         custom_storage = get_client(CustomStorage)
         
-        # Read from query parameters (since it's a GET request)
-        try:
-            category = request.params.category if hasattr(request.params, 'category') else ''
-        except Exception:
-            category = ''
-
-        object_key = category_key(category) if category else "Games"
-        response = custom_storage.GetVersionedObject(
-            collection_name="domain",
-            collection_version=COLLECTION_DOMAIN_VER,
-            object_key=object_key
-        )
+        category = query_param(request, 'category').strip()
+        if not category:
+            return Response(code=400, errors=[APIError(code=400, message="Query parameter 'category' is required")])
 
         try:
-            result = json.loads(response.decode("utf-8"))
-        except (AttributeError, UnicodeDecodeError, json.JSONDecodeError):
-            error_msg = response.get("errors", [{}])[0].get("message", "Unknown error") if isinstance(response, dict) else str(response)
-            return Response(code=500, errors=[APIError(code=500, message=f"Error fetching category: {error_msg}")])
+            result = get_object(custom_storage, "domain", COLLECTION_DOMAIN_VER, category_key(category))
+        except StorageError as e:
+            return Response(code=500, errors=[APIError(code=500, message=f"Error fetching category: {e}")])
+        if result is None:
+            return Response(code=404, errors=[APIError(code=404, message=f"Category '{category}' not found")])
 
         logger.info(f"Successfully completed /search-categories for {category}")
         return Response(body=result, code=200)

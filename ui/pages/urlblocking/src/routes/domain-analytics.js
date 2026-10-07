@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useFalconApiContext } from '../contexts/falcon-api-context';
 import { SlSpinner, SlCard, SlAlert } from '@shoelace-style/shoelace/dist/react';
+import { callFunction } from '../utils/api.js';
 
 const thClass = 'px-6 py-3 text-left text-xs font-medium uppercase tracking-wider';
 const tdClass = 'px-6 py-4 whitespace-nowrap text-sm';
@@ -45,15 +46,7 @@ function DomainAnalytics() {
             try {
                 setLoading(true);
                 setError(null);
-                const response = await falcon.cloudFunction({ name: 'urlblock' })
-                    .path('/domain-analytics')
-                    .get();
-
-                if (response?.body) {
-                    setAnalyticsData(response.body);
-                } else {
-                    setError('No data returned from API');
-                }
+                setAnalyticsData(await callFunction(falcon, 'GET', '/domain-analytics'));
             } catch (err) {
                 console.error('Error fetching analytics:', err);
                 setError(err.message);

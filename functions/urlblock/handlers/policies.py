@@ -8,8 +8,8 @@ from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_DOMAIN_VER, COLLECTION_RELATION_VER
 from app_utils import (
-    _sanitize_url_list, _build_rule, paginated_search,
-    relationship_key, validate_fqdn, _validate_falcon_response, _get_username,
+    _sanitize_url_list, _build_rule, read_all_objects, delete_object, query_param,
+    relationship_key, validate_fqdn, _validate_falcon_response, _get_username, safe_context,
 )
 
 PLATFORM_NAMES = {'windows': 'Windows', 'mac': 'Mac', 'linux': 'Linux'}
@@ -163,10 +163,10 @@ def _create_policy_with_rule_group(mgmt, fw_policies, policy_name, platform, pla
 
 
 @FUNC.handler(method='POST', path='/create-rule')
-def create_rule(request: Request, config: dict, logger: Logger) -> Response:
+def create_rule(request: Request, _: dict, logger: Logger) -> Response:
     """Create a firewall policy + rule group and persist the relationships."""
     logger.info("Starting create-rule handler")
-    logger.info(f"Config received: {config}")  # TEMP diagnostic: remove once the user context shape is known
+    logger.info(f"Request context: {safe_context(request)}")  # TEMP diagnostic: confirm where the user comes from
     try:
         if not request.body:
             return Response(code=400, body={"error": "Request body is required"})
@@ -177,7 +177,7 @@ def create_rule(request: Request, config: dict, logger: Logger) -> Response:
         categories = request.body.get('categories', {})
         whitelist_raw = request.body.get('whitelist', '').strip()
         host_group_name = request.body.get('hostGroupName', 'Unknown Host Group')
-        username = _get_username(config)
+        username = _get_username(request)
 
         platform_name = PLATFORM_NAMES.get(platform)
         if not platform_name:
@@ -226,7 +226,7 @@ def create_rule(request: Request, config: dict, logger: Logger) -> Response:
 def list_policies(_: Request, __: dict, logger: Logger) -> Response:
     try:
         custom_storage = get_client(CustomStorage)
-        result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+        result = read_all_objects(custom_storage, "relationship", COLLECTION_RELATION_VER, logger=logger)
         if "error" in result:
             return Response(code=500, body={"error": "Failed to list policies"})
 
@@ -257,7 +257,7 @@ def list_policies(_: Request, __: dict, logger: Logger) -> Response:
 
 def _parallel_delete_relationships(rule_group_id, custom_storage, logger=None):
     """Delete the relationships of a rule group. Returns the number actually deleted."""
-    result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+    result = read_all_objects(custom_storage, "relationship", COLLECTION_RELATION_VER, logger=logger)
     if "error" in result:
         if logger:
             logger.error(f"Could not list relationships to delete: {result['error']}")
@@ -275,16 +275,14 @@ def _parallel_delete_relationships(rule_group_id, custom_storage, logger=None):
 
     def _delete_single(key):
         try:
-            resp = custom_storage.DeleteObject(
-                collection_name="relationship", collection_version=COLLECTION_RELATION_VER, object_key=key)
+            if delete_object(custom_storage, "relationship", COLLECTION_RELATION_VER, key):
+                return True
         except Exception as e:
             if logger:
                 logger.error(f"Error deleting relationship {key}: {e}")
             return False
-        if resp.get('status_code') in (200, 204):
-            return True
         if logger:
-            logger.warning(f"Failed to delete relationship {key}: {resp.get('status_code')}")
+            logger.warning(f"Failed to delete relationship {key}")
         return False
 
     with ThreadPoolExecutor(max_workers=5) as executor:
@@ -328,7 +326,7 @@ def delete_policy(request: Request, _: dict, logger: Logger) -> Response:
 
 
 @FUNC.handler(method='POST', path='/update-policy')
-def update_policy(request: Request, config: dict, logger: Logger) -> Response:
+def update_policy(request: Request, _: dict, logger: Logger) -> Response:
     """
     Replace a policy. Order matters:
       1. delete ONLY the old policy (frees its name; old rule group + relations stay as a safety net)
@@ -346,7 +344,7 @@ def update_policy(request: Request, config: dict, logger: Logger) -> Response:
         categories = body.get('categories', {})
         whitelist_raw = body.get('whitelist', '').strip()
         host_group_name = body.get('hostGroupName', 'Unknown')
-        username = _get_username(config)
+        username = _get_username(request)
 
         platform_name = PLATFORM_NAMES.get(platform)
         if not platform_name or not old_rg_id or not policy_name or not host_group_id or not isinstance(categories, dict):
@@ -398,29 +396,41 @@ def update_policy(request: Request, config: dict, logger: Logger) -> Response:
         return Response(code=500, body={"error": "Failed to update policy"})
 
 
+def _blocking_candidates(fqdn: str) -> list:
+    """
+    Rule entries that would block `fqdn`, most specific first: the exact name, its own
+    wildcard and the wildcard of every parent domain (never a bare TLD wildcard like *.com).
+    e.g. mail.google.com -> [mail.google.com, *.mail.google.com, *.google.com]
+    """
+    labels = fqdn.split('.')
+    return [fqdn] + ['*.' + '.'.join(labels[i:]) for i in range(len(labels) - 1)]
+
+
 @FUNC.handler(method='GET', path='/simulate-policy')
 def simulate_policy(request: Request, _: dict, logger: Logger) -> Response:
     try:
-        fqdn = getattr(request.params, 'fqdn', '').strip().lower()
+        fqdn = query_param(request, 'fqdn').strip().lower()
         if not fqdn: return Response(code=400, body={"error": "fqdn required"})
         if not validate_fqdn(fqdn): return Response(code=400, body={"error": "Invalid fqdn"})
-        
-        custom_storage = get_client(CustomStorage)
-        wildcard_query = f'*.{fqdn}'
 
-        def _matches(item):
+        custom_storage = get_client(CustomStorage)
+        candidates = _blocking_candidates(fqdn)
+
+        def _matching_entry(item):
             domains = {d.strip().lower() for d in item.get('domain', '').split(';') if d.strip()}
-            return fqdn in domains or wildcard_query in domains
+            return next((c for c in candidates if c in domains), None)
 
         # Early return: stop paging as soon as the domain is found
-        result = paginated_search(custom_storage, 'domain', COLLECTION_DOMAIN_VER,
-                                  page_size=100, max_pages=50, stop_when=_matches)
+        result = read_all_objects(custom_storage, 'domain', COLLECTION_DOMAIN_VER,
+                                  stop_when=lambda item: _matching_entry(item) is not None, logger=logger)
         if "error" in result:
             return Response(code=500, body={"error": "Failed to simulate"})
 
         item = result["match"]
         if item:
-            return Response(code=200, body={"encontrado": True, "categoria": item.get('category'), "mensaje": f"Bloqueado por {item.get('category')}", "pagination": result["pagination"]})
+            return Response(code=200, body={"encontrado": True, "categoria": item.get('category'),
+                                            "regla": _matching_entry(item),
+                                            "mensaje": f"Bloqueado por {item.get('category')}", "pagination": result["pagination"]})
 
         return Response(code=200, body={"encontrado": False, "categoria": None, "mensaje": "No bloqueado", "pagination": result["pagination"]})
     except Exception as e:
@@ -433,7 +443,7 @@ def check_enforcement(request: Request, _: dict, logger: Logger) -> Response:
     """Verificar el estado de enforcement de una política específica."""
     logger.info("Starting /check-enforcement handler")
     try:
-        policy_id = getattr(request.params, 'policy_id', '').strip()
+        policy_id = query_param(request, 'policy_id').strip()
         if not policy_id:
             return Response(code=400, body={"error": "policy_id is required"})
             
@@ -477,7 +487,7 @@ def health_check(request: Request, _: dict, logger: Logger) -> Response:
         fw_policies = get_client(FirewallPolicies)
         mgmt = get_client(FirewallManagement)
 
-        result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+        result = read_all_objects(custom_storage, "relationship", COLLECTION_RELATION_VER, logger=logger)
         if "error" in result:
             return Response(code=500, body={"error": "Failed to read relationships"})
 

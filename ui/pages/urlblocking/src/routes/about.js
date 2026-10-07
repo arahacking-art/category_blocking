@@ -1,6 +1,7 @@
 import React, { useState, useContext, useRef } from "react";
 import { SlAlert, SlButton } from "@shoelace-style/shoelace/dist/react";
 import { FalconApiContext } from "../contexts/falcon-api-context";
+import { callFunction } from "../utils/api.js";
 
 function About() {
   const { falcon, refreshCategories } = useContext(FalconApiContext);
@@ -15,22 +16,13 @@ function About() {
   const [isImporting, setIsImporting] = useState(false);
   const [importStatus, setImportStatus] = useState(null);
 
-  const cf = () => falcon.cloudFunction({ name: 'urlblock', version: 1 });
-
-  const responseError = (response, fallback) =>
-    response?.errors?.[0]?.message || response?.body?.error || fallback;
-
   const handleImportCsv = async () => {
     if (!csvFile) return;
     try {
       setIsImporting(true);
       setImportStatus(null);
       const csv = await csvFile.text();
-      const response = await cf().path('/import-csv').post({ csv });
-      if (response.status_code !== 200) {
-        throw new Error(responseError(response, 'Import failed'));
-      }
-      const b = response.body;
+      const b = await callFunction(falcon, 'POST', '/import-csv', { csv });
       setImportStatus({
         type: b.failed_imports > 0 ? 'warning' : 'success',
         message: `Imported ${b.successful_imports} categories (${b.domains_imported} domains) from ${b.total_rows} rows` +
@@ -66,37 +58,19 @@ function About() {
         .filter(url => url.length > 0)
         .join(',');
 
-      const config = {
-        name: 'urlblock',
-        version: 1
-      };
-
-      const cloudFunction = falcon.cloudFunction(config);
-
-      console.log('Sending request with:', {
+      const result = await callFunction(falcon, 'POST', '/manage-category', {
         categoryName: categoryName.trim(),
         urls: cleanedUrls
       });
 
-      const response = await cloudFunction.path('/manage-category').post({
-        categoryName: categoryName.trim(),
-        urls: cleanedUrls
+      setStatus({
+        type: 'success',
+        message: `Category created successfully with ${result.urlCount || 0} URLs!`
       });
-
-      console.log('Response:', response);
-
-      if (response.status_code === 200) {
-        setStatus({
-          type: 'success',
-          message: `Category created successfully with ${response.body.urlCount || 0} URLs!`
-        });
-        // Clear form
-        setCategoryName('');
-        setUrls('');
-        refreshCategories?.();
-      } else {
-        throw new Error(responseError(response, 'Failed to create category'));
-      }
+      // Clear form
+      setCategoryName('');
+      setUrls('');
+      refreshCategories?.();
     } catch (error) {
       console.error('Error in handleCreateCategory:', error);
       setStatus({

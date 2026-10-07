@@ -2,6 +2,7 @@ import React, { useState, useEffect, useContext, useRef } from 'react';
 import { FalconApiContext } from '../contexts/falcon-api-context';
 import { categoryKey } from '../utils/keys.js';
 import { fetchCategoryNames } from '../utils/categories.js';
+import { callFunction } from '../utils/api.js';
 import {
   SlButton,
   SlDialog,
@@ -77,14 +78,13 @@ function FirewallRules() {
   // Data fetchers
   // ─────────────────────────────────────────────────────────────────────────
 
-  const cf = () => falcon.cloudFunction({ name: 'urlblock', version: 1 });
 
   const loadPolicies = async () => {
     setIsLoading(true);
     setTableError(null);
     try {
-      const resp = await cf().path('/list-policies').get();
-      setPolicies(resp.body?.policies ?? []);
+      const body = await callFunction(falcon, 'GET', '/list-policies');
+      setPolicies(body?.policies ?? []);
     } catch (err) {
       console.error('loadPolicies error:', err);
       setTableError('No se pudieron cargar las políticas. Intenta recargar la página.');
@@ -115,7 +115,7 @@ function FirewallRules() {
     }
     setDeletingId(ruleGroupId);
     try {
-      await cf().path('/delete-policy').post({ rule_group_id: ruleGroupId, policy_id: policyId || '' });
+      await callFunction(falcon, 'POST', '/delete-policy', { rule_group_id: ruleGroupId, policy_id: policyId || '' });
       await loadPolicies();
     } catch (err) {
       console.error('handleDelete error:', err);
@@ -173,7 +173,7 @@ function FirewallRules() {
       }
 
       // 2. Call update-policy
-      const resp = await cf().path('/update-policy').post({
+      await callFunction(falcon, 'POST', '/update-policy', {
         ruleGroupId: editPolicy.rule_group_id,
         policyId:    editPolicy.policy_id || '',
         policyName:  editPolicy.policy_name,

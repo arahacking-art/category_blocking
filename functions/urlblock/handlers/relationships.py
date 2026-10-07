@@ -6,10 +6,10 @@ from falconpy import CustomStorage
 from logging import Logger
 
 from app_core import FUNC, get_client, COLLECTION_RELATION_VER
-from app_utils import paginated_search, relationship_key, _get_username
+from app_utils import read_all_objects, relationship_key, _get_username
 
 @FUNC.handler(method='POST', path='/manage-relationship')
-def manage_relationship(request: Request, config: dict, logger: Logger) -> Response:
+def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
     """Create or update relationship between category, rule group, and host."""
     logger.info("Starting /manage-relationship handler")
     try:
@@ -22,7 +22,7 @@ def manage_relationship(request: Request, config: dict, logger: Logger) -> Respo
             "host_group_name": request.body.get('host_group_name', ''),
             "policy_name": request.body.get('policy_name', ''),
             "created_at": request.body.get('created_at', datetime.now(pytz.UTC).isoformat()),
-            "created_by": _get_username(config)
+            "created_by": _get_username(request)
         }
 
         required_fields = ['category_name', 'rule_group_id', 'host_group_id']
@@ -52,23 +52,25 @@ def get_relationship(request: Request, _: dict, logger: Logger) -> Response:
     logger.info("Starting /get-relationship handler")
     try:
         custom_storage = get_client(CustomStorage)
-        result = paginated_search(custom_storage, "relationship", COLLECTION_RELATION_VER)
+        result = read_all_objects(custom_storage, "relationship", COLLECTION_RELATION_VER, logger=logger)
         if "error" in result:
             raise ValueError("Failed to fetch relationship")
 
         relationship = result['resources']
         nodes, links, nodes_set = [], [], set()
 
+        required = ('category_name', 'rule_group_id', 'host_group_id')
+        relationship = [r for r in relationship if all(r.get(f) for f in required)]
         for rel in relationship:
             if rel['category_name'] not in nodes_set:
                 nodes_set.add(rel['category_name'])
                 nodes.append({"id": rel['category_name'], "name": rel['category_name'], "type": "category"})
             if rel['rule_group_id'] not in nodes_set:
                 nodes_set.add(rel['rule_group_id'])
-                nodes.append({"id": rel['rule_group_id'], "name": rel['rule_group_name'], "type": "rule_group"})
+                nodes.append({"id": rel['rule_group_id'], "name": rel.get('rule_group_name', ''), "type": "rule_group"})
             if rel['host_group_id'] not in nodes_set:
                 nodes_set.add(rel['host_group_id'])
-                nodes.append({"id": rel['host_group_id'], "name": rel['host_group_name'], "type": "host_group"})
+                nodes.append({"id": rel['host_group_id'], "name": rel.get('host_group_name', ''), "type": "host_group"})
 
             links.append({"source": rel['category_name'], "target": rel['rule_group_id']})
             links.append({"source": rel['rule_group_id'], "target": rel['host_group_id']})

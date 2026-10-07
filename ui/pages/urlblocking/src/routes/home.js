@@ -2,6 +2,7 @@ import React, { useContext, useState, useEffect } from "react";
 import { FalconApiContext } from "../contexts/falcon-api-context";
 import { categoryKey } from "../utils/keys.js";
 import { fetchCategoryNames } from "../utils/categories.js";
+import { callFunction } from "../utils/api.js";
 import { Link } from '../components/link';
 import { SlSpinner, SlSelect, SlOption, SlButton, SlCheckbox, SlTextarea, SlAlert } from '@shoelace-style/shoelace/dist/react';
 import '@shoelace-style/shoelace/dist/themes/light.css';
@@ -33,6 +34,7 @@ function Home() {
   const [platform, setPlatform] = useState('');
   const [selectedUrls, setSelectedUrls] = useState('');
   const [categoryDomains, setCategoryDomains] = useState({});
+  const [previewedCategories, setPreviewedCategories] = useState([]); // selection the preview was built from
   const [whitelist, setWhitelist] = useState('');
   const [status, setStatus] = useState(null);
   const [isLoading, setIsLoading] = useState(true);
@@ -52,12 +54,10 @@ function Home() {
         setIsLoading(true);
         setLoadingCategories(true);
 
-        const config = { name: 'urlblock', version: 1 };
-        const cloudFunction = falcon.cloudFunction(config);
-        const hostGroupsResponse = await cloudFunction.path('/urlblock').get();
+        const hostGroupsBody = await callFunction(falcon, 'GET', '/urlblock');
 
-        if (hostGroupsResponse?.body?.host_groups) {
-          setHostGroups(hostGroupsResponse.body.host_groups);
+        if (hostGroupsBody?.host_groups) {
+          setHostGroups(hostGroupsBody.host_groups);
         }
 
         // Use cached categories if available
@@ -139,6 +139,7 @@ function Home() {
         }
       });
       setCategoryDomains(domainsMap);
+      setPreviewedCategories([...selectedCategories]);
 
       // For preview display, join all domains together
       const allUrls = Object.values(domainsMap).filter(Boolean).join(';');
@@ -175,13 +176,21 @@ function Home() {
       if (!platform) throw new Error('Please select a platform');
       if (Object.keys(categoryDomains).length === 0) throw new Error('Please preview domains first');
 
+      // The rule is built from the preview: refuse if the selection changed afterwards
+      const sameSelection = previewedCategories.length === selectedCategories.length &&
+        selectedCategories.every(c => previewedCategories.includes(c));
+      if (!sameSelection) {
+        throw new Error('The category selection changed after the preview. Click "Preview" again.');
+      }
+      const withoutDomains = selectedCategories.filter(c => !categoryDomains[c]);
+      if (withoutDomains.length > 0) {
+        throw new Error(`No domains found for: ${withoutDomains.join(', ')}. Unselect them or fix the categories.`);
+      }
+
       setStatus({
         type: 'info',
         message: 'Creating blocking rule...'
       });
-
-      const config = { name: 'urlblock', version: 1 };
-      const cloudFunction = falcon.cloudFunction(config);
 
       const categoriesPayload = {};
       selectedCategories.forEach(category => {
@@ -192,7 +201,7 @@ function Home() {
       
       const hostGroupName = hostGroups.find(g => g.id === selectedHostGroup)?.name;
 
-      const response = await cloudFunction.path('/create-rule').post({
+      const result = await callFunction(falcon, 'POST', '/create-rule', {
         hostGroupId: selectedHostGroup,
         hostGroupName: hostGroupName,
         policyName: policyName,
@@ -203,7 +212,7 @@ function Home() {
 
       setStatus({
         type: 'success',
-        message: `Successfully created ${response.body.rulesCreated} rule(s) and assigned ${selectedCategories.length} categories!`
+        message: `Successfully created ${result.rulesCreated} rule(s) and assigned ${selectedCategories.length} categories!`
       });
 
       // Reset form
@@ -213,6 +222,7 @@ function Home() {
       setPlatform('');
       setSelectedUrls('');
       setCategoryDomains({});
+      setPreviewedCategories([]);
       setWhitelist('');
 
     } catch (error) {
@@ -230,13 +240,9 @@ function Home() {
     setIsSimulating(true);
     setSimulatorResult(null);
     try {
-      const config = { name: 'urlblock', version: 1 };
-      const cloudFunction = falcon.cloudFunction(config);
-      // Pass fqdn as query param via the GET call
+      // fqdn travels as a query param (request.params.query in the function)
       const fqdn = encodeURIComponent(simulatorFqdn.trim().toLowerCase());
-      const response = await cloudFunction.path('/simulate-policy?fqdn=' + fqdn).get();
-      console.log('Simulator response:', response);
-      setSimulatorResult(response.body);
+      setSimulatorResult(await callFunction(falcon, 'GET', '/simulate-policy?fqdn=' + fqdn));
     } catch (error) {
       console.error('Simulator error:', error);
       setSimulatorResult({ error: error.message });

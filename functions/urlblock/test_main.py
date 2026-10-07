@@ -1,337 +1,317 @@
-"""Tests for the urlblock function handlers.
+"""Tests for storage helpers, category/CSV handlers, relationships and the policy simulator.
 
-The Foundry SDK and FalconPy are stubbed in conftest.py, so no real SDK is needed.
-Handlers obtain their Custom Storage client through `get_client`, which is patched
-per module to return a MagicMock.
+Requests use the real Foundry request model (see conftest.py) and Custom Storage is the
+in-memory FakeStorage, which answers with FalconPy's real response shapes.
 """
 
-import io
-import threading
-import types
 import unittest
 from unittest.mock import MagicMock, patch
 
-from crowdstrike.foundry.function import Request
+from crowdstrike.foundry.function import Request, RequestParams
 
-import app_core
 import main  # noqa: F401  (registers all handlers)
-from app_utils import paginated_search
+from app_utils import (
+    list_object_keys, read_all_objects, parse_object_response, query_param, StorageError,
+    _get_username, safe_context,
+)
+from conftest import FakeStorage, falcon_response
 from handlers import categories, policies, relationships
 
+DOMAIN = ("domain", "v2.0")
+REL = ("relationship", "v5.0")
 
-def make_request(body=None, **params):
-    return Request(body=body, params=types.SimpleNamespace(**params))
 
-
-def search_page(items, status_code=200, next_cursor=None):
-    resp = {"status_code": status_code, "resources": items}
-    if next_cursor:
-        resp["body"] = {"meta": {"pagination": {"next": next_cursor}}}
-    return resp
+def req(body=None, query=None, context=None):
+    return Request(body=body or {}, params=RequestParams(query={k: [v] for k, v in (query or {}).items()}),
+                   context=context or {})
 
 
 class HandlerTestCase(unittest.TestCase):
-    """Base: patches `get_client` in the handler module under test."""
-
     module = None
+    data = {}
 
     def setUp(self):
         self.logger = MagicMock()
-        self.api = MagicMock()
-        p = patch.object(self.module, "get_client", return_value=self.api)
+        self.store = FakeStorage(self.data)
+        p = patch.object(self.module, "get_client", return_value=self.store)
         p.start()
         self.addCleanup(p.stop)
 
 
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+class QueryParamTestCase(unittest.TestCase):
+    def test_reads_first_value_of_sdk_query_lists(self):
+        self.assertEqual(query_param(req(query={"fqdn": "a.com"}), "fqdn"), "a.com")
+
+    def test_missing_param_returns_default(self):
+        self.assertEqual(query_param(req(), "fqdn", "x"), "x")
+
+    def test_accepts_dict_params(self):
+        request = Request()
+        request.params = {"query": {"limit": ["5"]}}
+        self.assertEqual(query_param(request, "limit"), "5")
+
+
+class UsernameTestCase(unittest.TestCase):
+    def test_reads_user_from_request_context(self):
+        self.assertEqual(_get_username(req(context={"user": {"username": "ana"}})), "ana")
+        self.assertEqual(_get_username(req(context={"user_id": "u-1"})), "u-1")
+
+    def test_unknown_without_context(self):
+        self.assertEqual(_get_username(req()), "unknown")
+
+    def test_safe_context_redacts_tokens(self):
+        ctx = safe_context(req(context={"user_id": "u", "access_token": "secret"}))
+        self.assertEqual(ctx, {"user_id": "u", "access_token": "<redacted>"})
+
+
+class StorageHelpersTestCase(unittest.TestCase):
+    def test_list_keys_pages_with_inclusive_start_cursor(self):
+        store = FakeStorage({DOMAIN: {f"k{i:02d}": {} for i in range(5)}})
+        result = list_object_keys(store, *DOMAIN, page_size=2)
+        self.assertEqual(result["keys"], ["k00", "k01", "k02", "k03", "k04"])
+        self.assertFalse(result["pagination"]["truncated"])
+
+    def test_list_keys_truncated_at_max_pages(self):
+        store = FakeStorage({DOMAIN: {f"k{i}": {} for i in range(10)}})
+        result = list_object_keys(store, *DOMAIN, page_size=2, max_pages=2)
+        self.assertTrue(result["pagination"]["truncated"])
+        self.assertEqual(len(result["keys"]), 3)  # 2 + 1 new (cursor key repeated)
+
+    def test_list_error(self):
+        store = FakeStorage()
+        store.list_status = 403
+        self.assertIn("error", list_object_keys(store, *DOMAIN))
+
+    def test_read_all_objects_returns_full_records_with_key(self):
+        for json_objects in (False, True):
+            store = FakeStorage({DOMAIN: {"Games": {"category": "Games", "domain": "a.com"}}},
+                                json_objects=json_objects)
+            result = read_all_objects(store, *DOMAIN)
+            self.assertEqual(result["resources"], [{"category": "Games", "domain": "a.com", "_key": "Games"}])
+
+    def test_read_all_counts_unreadable_objects(self):
+        store = FakeStorage({DOMAIN: {"a": {"x": 1}, "b": {"x": 2}}})
+        store.fail_get.add("b")
+        result = read_all_objects(store, *DOMAIN)
+        self.assertEqual(len(result["resources"]), 1)
+        self.assertEqual(result["failed"], 1)
+
+    def test_parse_object_response_shapes(self):
+        self.assertEqual(parse_object_response(b'{"a": 1}'), {"a": 1})
+        self.assertEqual(parse_object_response(falcon_response(body={"a": 1})), {"a": 1})
+        self.assertIsNone(parse_object_response(falcon_response(404)))
+        with self.assertRaises(StorageError):
+            parse_object_response(falcon_response(500))
+
+
+# ---------------------------------------------------------------------------
+# Categories
+# ---------------------------------------------------------------------------
+
 class ManageCategoryTestCase(HandlerTestCase):
     module = categories
 
-    def test_success_uses_versioned_put(self):
-        self.api.PutObjectByVersion.return_value = {"status_code": 200}
-        req = make_request({"categoryName": "Games", "urls": "steam.com,epicgames.com"})
-
-        resp = categories.manage_category(req, None, self.logger)
-
+    def test_success_writes_versioned_object(self):
+        resp = categories.manage_category(req({"categoryName": "Games", "urls": "steam.com,epicgames.com"}), None, self.logger)
         self.assertEqual(resp.code, 200)
-        self.assertTrue(resp.body["success"])
-        self.assertEqual(resp.body["categoryName"], "Games")
-        self.api.PutObjectByVersion.assert_called_once()
-        kwargs = self.api.PutObjectByVersion.call_args.kwargs
-        self.assertEqual(kwargs["collection_version"], "v2.0")
-        self.assertEqual(kwargs["collection_name"], "domain")
-        self.api.PutObject.assert_not_called()
+        self.assertEqual(resp.body["urlCount"], 4)
+        obj = self.store.objects(*DOMAIN)["Games"]
+        self.assertEqual(obj["domain"], "steam.com;*.steam.com;epicgames.com;*.epicgames.com")
 
-    def test_missing_name(self):
-        resp = categories.manage_category(make_request({"categoryName": "", "urls": "a.com"}), None, self.logger)
-        self.assertEqual(resp.code, 400)
-        self.assertEqual(resp.body["error"], "Category name is required")
+    def test_missing_name_and_urls(self):
+        self.assertEqual(categories.manage_category(req({"categoryName": "", "urls": "a.com"}), None, self.logger).code, 400)
+        self.assertEqual(categories.manage_category(req({"categoryName": "G", "urls": ""}), None, self.logger).code, 400)
 
-    def test_missing_urls(self):
-        resp = categories.manage_category(make_request({"categoryName": "Games", "urls": ""}), None, self.logger)
-        self.assertEqual(resp.code, 400)
-        self.assertEqual(resp.body["error"], "URLs are required")
+    def test_all_invalid_urls(self):
+        self.assertEqual(categories.manage_category(req({"categoryName": "X", "urls": "nope"}), None, self.logger).code, 400)
+
+    def test_put_error_returns_500(self):
+        self.store.fail_put.add("Games")
+        resp = categories.manage_category(req({"categoryName": "Games", "urls": "a.com"}), None, self.logger)
+        self.assertEqual(resp.code, 500)
+
+
+class CategoryCaseConflictTestCase(HandlerTestCase):
+    module = categories
+    data = {DOMAIN: {"AI_Apps": {"category": "AI Apps", "domain": "a.com"}}}
+
+    def test_rejects_key_differing_only_by_case(self):
+        resp = categories.manage_category(req({"categoryName": "ai apps", "urls": "b.com"}), None, self.logger)
+        self.assertEqual(resp.code, 409)
+        self.assertIn("AI_Apps", resp.body["error"])
+        self.assertNotIn("ai_apps", self.store.objects(*DOMAIN))
+
+    def test_updates_existing_exact_key(self):
+        resp = categories.manage_category(req({"categoryName": "AI Apps", "urls": "b.com"}), None, self.logger)
+        self.assertEqual(resp.code, 200)
+        self.assertEqual(self.store.objects(*DOMAIN)["AI_Apps"]["domain"], "b.com;*.b.com")
+
+
+class ListCategoriesTestCase(HandlerTestCase):
+    module = categories
+    data = {DOMAIN: {
+        "Games": {"category": "Games", "domain": "steam.com"},
+        "AI_Apps": {"category": "AI Apps", "domain": "openai.com"},
+    }}
+
+    def test_returns_names_domains_and_pagination(self):
+        resp = categories.list_categories(req(), None, self.logger)
+        self.assertEqual(resp.code, 200)
+        self.assertEqual(resp.body["categories"], ["AI Apps", "Games"])
+        self.assertEqual(resp.body["total_items"], 2)
+        self.assertEqual(resp.body["pagination"]["returned"], 2)
+        self.assertFalse(resp.body["pagination"]["truncated"])
+
+    def test_limit_query_param_is_used_and_capped(self):
+        resp = categories.list_categories(req(query={"limit": "9999"}), None, self.logger)
+        self.assertEqual(resp.body["pagination"]["page_size"], 500)
+        resp = categories.list_categories(req(query={"limit": "1"}), None, self.logger)
+        self.assertEqual(resp.body["pagination"]["page_size"], 1)
+        self.assertEqual(resp.body["metadata"]["limit"], 1)
 
     def test_api_error_returns_500(self):
-        self.api.PutObjectByVersion.return_value = {"status_code": 500, "body": {"message": "boom"}}
-        resp = categories.manage_category(
-            make_request({"categoryName": "Games", "urls": "steam.com"}), None, self.logger)
+        self.store.list_status = 403
+        resp = categories.list_categories(req(), None, self.logger)
         self.assertEqual(resp.code, 500)
 
 
 class SearchCategoriesTestCase(HandlerTestCase):
     module = categories
+    data = {DOMAIN: {"AI_Apps": {"category": "AI Apps", "domain": "openai.com"}}}
 
-    def test_success_uses_get_versioned_object(self):
-        self.api.GetVersionedObject.return_value = b'{"category": "Games", "domain": "steam.com"}'
-
-        resp = categories.search_categories(make_request(category="Games"), None, self.logger)
-
+    def test_finds_by_name_from_query(self):
+        resp = categories.search_categories(req(query={"category": "AI Apps"}), None, self.logger)
         self.assertEqual(resp.code, 200)
-        self.assertEqual(resp.body["category"], "Games")
-        kwargs = self.api.GetVersionedObject.call_args.kwargs
-        self.assertEqual(kwargs["collection_version"], "v2.0")
-        self.assertEqual(kwargs["collection_name"], "domain")
-        self.assertEqual(kwargs["object_key"], "Games")
-        self.api.GetObject.assert_not_called()
+        self.assertEqual(resp.body["domain"], "openai.com")
 
-    def test_client_failure_returns_500(self):
-        with patch.object(categories, "get_client", side_effect=Exception("Connection failed")):
-            resp = categories.search_categories(make_request(), None, self.logger)
-        self.assertEqual(resp.code, 500)
-        self.assertIn("Connection failed", resp.errors[0].message)
+    def test_not_found_and_missing_param(self):
+        self.assertEqual(categories.search_categories(req(query={"category": "Nope"}), None, self.logger).code, 404)
+        self.assertEqual(categories.search_categories(req(), None, self.logger).code, 400)
 
 
-class ListCategoriesTestCase(HandlerTestCase):
+# ---------------------------------------------------------------------------
+# CSV import
+# ---------------------------------------------------------------------------
+
+class ImportCsvTestCase(HandlerTestCase):
     module = categories
+    data = {DOMAIN: {"AI_Applications": {"category": "AI Applications", "domain": "x.com"}}}
 
-    def test_returns_resources_and_pagination(self):
-        self.api.SearchObjects.return_value = search_page([
-            {"_key": "Games", "category": "Games", "domain": "steam.com"},
-            {"_key": "News", "category": "News", "domain": "bbc.com"},
-        ])
+    def run_csv(self, text):
+        return categories.import_csv_handler(req({"csv": text}), None, self.logger)
 
-        resp = categories.list_categories(make_request(), None, self.logger)
+    def test_requires_csv(self):
+        self.assertEqual(categories.import_csv_handler(req({}), None, self.logger).code, 400)
 
+    def test_one_row_per_domain_is_merged_per_category(self):
+        resp = self.run_csv("category,url\nGames,steam.com\nGames,epicgames.com\nNews,bbc.com\nGames,steam.com\n")
         self.assertEqual(resp.code, 200)
-        self.assertEqual(resp.body["total_items"], 2)
-        self.assertEqual(resp.body["categories"], ["Games", "News"])
-        self.assertEqual(len(resp.body["domains"]), 2)
-        pagination = resp.body["pagination"]
-        self.assertEqual(pagination["returned"], 2)
-        self.assertEqual(pagination["pages_fetched"], 1)
-        self.assertFalse(pagination["has_more"])
-        self.assertIsNone(pagination["next_cursor"])
-        kwargs = self.api.SearchObjects.call_args.kwargs
-        self.assertEqual(kwargs["collection_name"], "domain")
-        self.assertEqual(kwargs["collection_version"], "v2.0")
+        self.assertEqual((resp.body["total_rows"], resp.body["successful_imports"], resp.body["failed_imports"]), (4, 2, 0))
+        self.assertEqual(self.store.objects(*DOMAIN)["Games"]["domain"].split(";"),
+                         ["steam.com", "*.steam.com", "epicgames.com", "*.epicgames.com"])
+        self.assertEqual(resp.body["domains_imported"], 6)
 
-    def test_limit_param_is_capped_at_500(self):
-        self.api.SearchObjects.return_value = search_page([])
-        categories.list_categories(make_request(limit="9999"), None, self.logger)
-        self.assertEqual(self.api.SearchObjects.call_args.kwargs["limit"], 500)
+    def test_invalid_rows_and_case_conflicts_are_counted(self):
+        resp = self.run_csv("Games,steam.com\nGames,not a domain\n,x.com\nShort\nai applications,b.com\nAI_Applications,c.com\n")
+        self.assertEqual(resp.body["successful_imports"], 2)   # Games + AI_Applications
+        self.assertEqual(resp.body["failed_imports"], 3)       # bad domain, empty category, case conflict
+        self.assertNotIn("ai_applications", self.store.objects(*DOMAIN))
+        self.assertEqual(self.store.objects(*DOMAIN)["AI_Applications"]["domain"], "c.com;*.c.com")
 
-    def test_api_error_returns_400(self):
-        self.api.SearchObjects.return_value = {"status_code": 403, "errors": ["denied"]}
-        resp = categories.list_categories(make_request(), None, self.logger)
-        self.assertEqual(resp.code, 400)
-        self.assertIn("API Error", resp.errors[0].message)
+    def test_write_failures_are_counted(self):
+        self.store.fail_put.add("News")
+        resp = self.run_csv("category,url\nGames,steam.com\nNews,bbc.com\n")
+        self.assertEqual((resp.body["successful_imports"], resp.body["failed_imports"]), (1, 1))
+        self.assertTrue(any("News" in str(c) for c in self.logger.error.call_args_list))
+
+    def test_writes_run_concurrently(self):
+        import threading
+        barrier = threading.Barrier(2, timeout=5)
+        original_put = self.store.PutObjectByVersion
+
+        def put(**kw):
+            barrier.wait()  # only completes if two writes run at the same time
+            return original_put(**kw)
+
+        self.store.PutObjectByVersion = put
+        resp = self.run_csv("category,url\nGames,steam.com\nNews,bbc.com\n")
+        self.assertEqual(resp.body["successful_imports"], 2)
 
 
-class ListPoliciesTestCase(HandlerTestCase):
-    module = policies
-
-    def test_groups_by_rule_group_and_includes_pagination(self):
-        self.api.SearchObjects.return_value = search_page([
-            {"_key": "1", "rule_group_id": "rg1", "policy_name": "P1", "category_name": "Games"},
-            {"_key": "2", "rule_group_id": "rg1", "policy_name": "P1", "category_name": "News"},
-            {"_key": "3", "rule_group_id": "rg2", "policy_name": "P2", "category_name": "Games"},
-            {"_key": "4", "category_name": "orphan"},  # no rule_group_id: ignored
-        ])
-
-        resp = policies.list_policies(make_request(), None, self.logger)
-
-        self.assertEqual(resp.code, 200)
-        by_id = {p["rule_group_id"]: p for p in resp.body["policies"]}
-        self.assertEqual(set(by_id), {"rg1", "rg2"})
-        self.assertEqual(by_id["rg1"]["categories"], ["Games", "News"])
-        self.assertEqual(resp.body["pagination"]["returned"], 4)
-        self.assertFalse(resp.body["pagination"]["truncated"])
-        self.assertEqual(self.api.SearchObjects.call_args.kwargs["collection_version"], "v5.0")
-
-    def test_api_error_returns_500(self):
-        self.api.SearchObjects.return_value = {"status_code": 500}
-        resp = policies.list_policies(make_request(), None, self.logger)
-        self.assertEqual(resp.code, 500)
-
+# ---------------------------------------------------------------------------
+# Relationships
+# ---------------------------------------------------------------------------
 
 class RelationshipTestCase(HandlerTestCase):
     module = relationships
+    data = {REL: {
+        "k1": {"category_name": "Games", "rule_group_id": "rg1", "rule_group_name": "P_RuleGroup",
+               "host_group_id": "hg1", "host_group_name": "Hosts"},
+        "broken": {"category_name": "Orphan"},
+    }}
 
-    def test_get_relationship_builds_graph_with_pagination(self):
-        self.api.SearchObjects.return_value = search_page([{
-            "_key": "k1", "category_name": "Games", "rule_group_id": "rg1",
-            "rule_group_name": "P_RuleGroup", "host_group_id": "hg1", "host_group_name": "Hosts",
-        }])
-
-        resp = relationships.get_relationship(make_request(), None, self.logger)
-
+    def test_get_relationship_builds_graph_and_skips_incomplete_records(self):
+        resp = relationships.get_relationship(req(), None, self.logger)
         self.assertEqual(resp.code, 200)
-        self.assertTrue(resp.body["success"])
         self.assertEqual(len(resp.body["relationship"]), 1)
-        graph = resp.body["graphData"]
-        self.assertEqual({n["type"] for n in graph["nodes"]}, {"category", "rule_group", "host_group"})
-        self.assertEqual(len(graph["links"]), 2)
-        self.assertEqual(resp.body["pagination"]["returned"], 1)
+        self.assertEqual({n["type"] for n in resp.body["graphData"]["nodes"]}, {"category", "rule_group", "host_group"})
+        self.assertEqual(len(resp.body["graphData"]["links"]), 2)
 
-    def test_get_relationship_api_error_returns_500(self):
-        self.api.SearchObjects.return_value = {"status_code": 500}
-        resp = relationships.get_relationship(make_request(), None, self.logger)
-        self.assertEqual(resp.code, 500)
+    def test_get_relationship_list_error(self):
+        self.store.list_status = 500
+        self.assertEqual(relationships.get_relationship(req(), None, self.logger).code, 500)
 
-    def test_manage_relationship_success(self):
-        self.api.PutObjectByVersion.return_value = {"status_code": 200}
-        req = make_request({
-            "category_name": "Games", "rule_group_id": "rg-123", "host_group_id": "hg-456",
-            "rule_group_name": "Games_RuleGroup", "host_group_name": "Hosts",
-        })
-
-        resp = relationships.manage_relationship(req, None, self.logger)
-
+    def test_manage_relationship_uses_context_user_and_deterministic_key(self):
+        body = {"category_name": "Games", "rule_group_id": "rg-1", "host_group_id": "hg-1", "created_by": "spoofed"}
+        resp = relationships.manage_relationship(req(body, context={"user": {"username": "ana"}}), None, self.logger)
         self.assertEqual(resp.code, 200)
-        self.assertEqual(resp.body["relationshipId"], "Games_rg-123_hg-456")
-        kwargs = self.api.PutObjectByVersion.call_args.kwargs
-        self.assertEqual(kwargs["collection_version"], "v5.0")
-        self.assertEqual(kwargs["collection_name"], "relationship")
-        self.assertEqual(kwargs["object_key"], "Games_rg-123_hg-456")
+        self.assertEqual(resp.body["relationshipId"], "Games_rg-1_hg-1")
+        self.assertEqual(self.store.objects(*REL)["Games_rg-1_hg-1"]["created_by"], "ana")
 
     def test_manage_relationship_missing_fields(self):
-        req = make_request({"category_name": "Games", "rule_group_id": "", "host_group_id": ""})
-        resp = relationships.manage_relationship(req, None, self.logger)
+        resp = relationships.manage_relationship(req({"category_name": "Games"}), None, self.logger)
         self.assertEqual(resp.code, 400)
-        self.assertIn("error", resp.body)
-        self.api.PutObjectByVersion.assert_not_called()
 
 
-class PaginatedSearchTestCase(unittest.TestCase):
-    def test_follows_cursor_and_drops_inclusive_duplicate(self):
-        api = MagicMock()
-        api.SearchObjects.side_effect = [
-            search_page([{"_key": "a"}, {"_key": "b"}], next_cursor="b"),
-            search_page([{"_key": "b"}, {"_key": "c"}]),  # cursor item repeated
-        ]
-        result = paginated_search(api, "domain", "v2.0", page_size=2)
-        self.assertEqual([r["_key"] for r in result["resources"]], ["a", "b", "c"])
-        self.assertEqual(result["pagination"]["pages_fetched"], 2)
-        self.assertFalse(result["pagination"]["has_more"])
-        self.assertEqual(api.SearchObjects.call_args_list[1].kwargs["start"], "b")
+# ---------------------------------------------------------------------------
+# Simulator
+# ---------------------------------------------------------------------------
 
-    def test_truncated_when_max_pages_reached(self):
-        api = MagicMock()
-        api.SearchObjects.return_value = search_page([{"_key": "a"}, {"_key": "b"}], next_cursor="b")
-        result = paginated_search(api, "domain", "v2.0", page_size=2, max_pages=1)
-        self.assertTrue(result["pagination"]["truncated"])
-        self.assertEqual(result["pagination"]["next_cursor"], "b")
+class SimulatePolicyTestCase(HandlerTestCase):
+    module = policies
+    data = {DOMAIN: {
+        "Search": {"category": "Search", "domain": "google.com;*.google.com"},
+        "Games": {"category": "Games", "domain": "steam.com"},
+    }}
 
-    def test_stop_when_returns_match(self):
-        api = MagicMock()
-        api.SearchObjects.return_value = search_page([{"_key": "a"}, {"_key": "b"}])
-        result = paginated_search(api, "domain", "v2.0", stop_when=lambda r: r["_key"] == "b")
-        self.assertEqual(result["match"], {"_key": "b"})
+    def simulate(self, fqdn):
+        return policies.simulate_policy(req(query={"fqdn": fqdn}), None, self.logger)
 
-    def test_error_response(self):
-        api = MagicMock()
-        api.SearchObjects.return_value = {"status_code": 500}
-        self.assertIn("error", paginated_search(api, "domain", "v2.0"))
+    def test_reads_fqdn_from_query(self):
+        resp = self.simulate("google.com")
+        self.assertEqual(resp.code, 200)
+        self.assertTrue(resp.body["encontrado"])
+        self.assertEqual(resp.body["categoria"], "Search")
 
+    def test_subdomain_matches_parent_wildcard(self):
+        resp = self.simulate("Mail.Google.com")
+        self.assertTrue(resp.body["encontrado"])
+        self.assertEqual(resp.body["regla"], "*.google.com")
 
-class ProcessCsvRecordsTestCase(unittest.TestCase):
-    CSV = "category,urls\nGames,steam.com\nNews,bbc.com\nBad,\nShort\n"
+    def test_subdomain_without_wildcard_is_not_blocked(self):
+        self.assertFalse(self.simulate("store.steam.com").body["encontrado"])
 
-    def run_process(self, api, **kwargs):
-        logger = MagicMock()
-        with patch("builtins.open", return_value=io.StringIO(self.CSV)):
-            results = categories.process_csv_records(
-                csv_path="/fake/path.csv", custom_storage=api, logger=logger,
-                collection_name="domain", collection_version="v2.0", **kwargs)
-        return results, logger
+    def test_unrelated_and_invalid(self):
+        self.assertFalse(self.simulate("example.org").body["encontrado"])
+        self.assertEqual(self.simulate("not a domain").code, 400)
+        self.assertEqual(policies.simulate_policy(req(), None, self.logger).code, 400)
 
-    def test_writes_valid_rows_with_versioned_method(self):
-        api = MagicMock()
-        api.PutObjectByVersion.return_value = {"status_code": 200}
-
-        results, logger = self.run_process(api)
-
-        self.assertEqual(api.PutObjectByVersion.call_count, 2)
-        keys = {c.kwargs["object_key"] for c in api.PutObjectByVersion.call_args_list}
-        self.assertEqual(keys, {"Games", "News"})
-        for c in api.PutObjectByVersion.call_args_list:
-            self.assertEqual(c.kwargs["collection_version"], "v2.0")
-            self.assertEqual(c.kwargs["collection_name"], "domain")
-        api.PutObject.assert_not_called()
-        self.assertEqual(results["total_rows"], 4)
-        self.assertEqual(results["success_count"], 2)
-        # "Bad," fails validation (empty domain); "Short" has <2 columns and is skipped
-        self.assertEqual(results["error_count"], 1)
-        logger.error.assert_called()
-
-    def test_runs_writes_concurrently(self):
-        barrier = threading.Barrier(2, timeout=5)
-
-        def put(**_kw):
-            barrier.wait()  # only completes if two workers run at the same time
-            return {"status_code": 200}
-
-        api = MagicMock()
-        api.PutObjectByVersion.side_effect = put
-
-        results, _ = self.run_process(api, max_workers=2)
-
-        self.assertEqual(results["success_count"], 2)
-
-    def test_http_error_codes_count_as_failures(self):
-        api = MagicMock()
-        api.PutObjectByVersion.side_effect = lambda **kw: {
-            "status_code": 500 if kw["object_key"] == "News" else 200}
-
-        results, logger = self.run_process(api)
-
-        self.assertEqual(results["success_count"], 1)
-        self.assertEqual(results["error_count"], 2)  # validation failure + HTTP 500
-        self.assertTrue(any("News" in str(c) and "HTTP 500" in str(c) for c in logger.error.call_args_list))
-
-    def test_exception_in_worker_is_counted_not_raised(self):
-        api = MagicMock()
-        api.PutObjectByVersion.side_effect = RuntimeError("network down")
-        results, _ = self.run_process(api)
-        self.assertEqual(results["success_count"], 0)
-        self.assertEqual(results["error_count"], 3)
-
-
-class GetClientCacheTestCase(unittest.TestCase):
-    class FakeClient:
-        def __init__(self, debug=False):
-            pass
-
-    def setUp(self):
-        app_core._client_cache.clear()
-        self.addCleanup(app_core._client_cache.clear)
-
-    def test_reuses_client_while_token_valid(self):
-        a = app_core.get_client(self.FakeClient)
-        b = app_core.get_client(self.FakeClient)
-        self.assertIs(a, b)
-
-    def test_not_cached_without_token(self):
-        with patch.object(app_core, "_current_token", return_value=None):
-            a = app_core.get_client(self.FakeClient)
-            b = app_core.get_client(self.FakeClient)
-        self.assertIsNot(a, b)
-
-    def test_rebuilt_after_ttl(self):
-        a = app_core.get_client(self.FakeClient)
-        key = self.FakeClient.__name__
-        app_core._client_cache[key] = (a, app_core._client_cache[key][1] - app_core.TOKEN_TTL - 1)
-        self.assertIsNot(a, app_core.get_client(self.FakeClient))
+    def test_candidates_never_include_bare_tld(self):
+        self.assertEqual(policies._blocking_candidates("a.b.com"), ["a.b.com", "*.a.b.com", "*.b.com"])
 
 
 if __name__ == "__main__":

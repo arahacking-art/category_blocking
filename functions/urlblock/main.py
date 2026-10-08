@@ -5,6 +5,9 @@ This module provides functionality for managing URL blocking rules in CrowdStrik
 It delegates handling to specific modules in the `handlers` directory.
 """
 
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import traceback
 from logging import Logger
 
@@ -21,7 +24,7 @@ import handlers.relationships
 # pylint: enable=unused-import
 
 @FUNC.handler(method='GET', path='/healthz')
-def healthz(request: Request, _: dict, logger: Logger) -> Response:
+def healthz(_request: Request, _: dict, logger: Logger) -> Response:
     """Basic health check — confirms the function is running."""
     logger.info("Starting /healthz handler")
     try:

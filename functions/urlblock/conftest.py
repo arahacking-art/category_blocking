@@ -7,6 +7,7 @@
 - `FakeStorage` emulates the FalconPy CustomStorage versioned methods with the real
   response shapes: {"status_code", "headers", "body": {...}} and raw bytes for objects.
 """
+# pylint: disable=missing-class-docstring,missing-function-docstring,invalid-name
 
 import json
 import os

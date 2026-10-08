@@ -1,3 +1,8 @@
+"""Shared Foundry function instance, version constants and cached FalconPy clients."""
+
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import time
 
 from crowdstrike.foundry.function import Function

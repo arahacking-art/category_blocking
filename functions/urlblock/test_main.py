@@ -3,6 +3,7 @@
 Requests use the real Foundry request model (see conftest.py) and Custom Storage is the
 in-memory FakeStorage, which answers with FalconPy's real response shapes.
 """
+# pylint: disable=missing-class-docstring,missing-function-docstring,invalid-name
 
 import threading
 import unittest

@@ -1,3 +1,8 @@
+"""Helpers for Custom Storage access, request parsing, validation and firewall rule building."""
+
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import json
 import re
 from concurrent.futures import ThreadPoolExecutor
@@ -274,6 +279,7 @@ def delete_object(custom_storage, collection_name: str, collection_version: str,
     return isinstance(resp, dict) and resp.get("status_code") in (200, 204)
 
 
+# pylint: disable-next=too-many-locals
 def read_all_objects(custom_storage, collection_name: str, collection_version: str,
                      page_size: int = 200, max_pages: int = 50, max_workers: int = 10,
                      stop_when=None, logger=None) -> dict:

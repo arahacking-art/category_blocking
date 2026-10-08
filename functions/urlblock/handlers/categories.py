@@ -1,3 +1,8 @@
+"""Handlers for managing domain categories and importing them from CSV."""
+
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import csv
 import io
 import time
@@ -46,6 +51,7 @@ def _merge_domains(*domain_strings):
     return merged
 
 
+# pylint: disable-next=too-many-locals
 def process_csv_records(csv_path=None, custom_storage=None, logger=None, collection_name="domain",
                         collection_version=COLLECTION_DOMAIN_VER, max_workers=10, csv_text=None):
     """
@@ -258,6 +264,7 @@ def search_categories(request: Request, _: dict, logger: Logger) -> Response:
 
 
 @FUNC.handler(method='POST', path='/manage-category')
+# pylint: disable-next=too-many-return-statements
 def manage_category(request: Request, _: dict, logger: Logger) -> Response:
     """Create or update a category with comma-separated URLs."""
     logger.info("Starting /manage-category handler")

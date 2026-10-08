@@ -1,3 +1,8 @@
+"""Handlers for category / rule group / host group relationships."""
+
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import traceback
 from datetime import datetime
 from logging import Logger
@@ -49,7 +54,7 @@ def manage_relationship(request: Request, _: dict, logger: Logger) -> Response:
         return Response(code=500, body={"error": "Unexpected error"})
 
 @FUNC.handler(method='GET', path='/get-relationship')
-def get_relationship(request: Request, _: dict, logger: Logger) -> Response:
+def get_relationship(_request: Request, _: dict, logger: Logger) -> Response:
     """Get all relationships and format for graph visualization."""
     logger.info("Starting /get-relationship handler")
     try:

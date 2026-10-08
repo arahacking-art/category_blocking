@@ -1,3 +1,8 @@
+"""Handlers for creating, updating, deleting, listing and simulating firewall policies."""
+
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -44,6 +49,7 @@ def on_create(_: Request, __: dict, logger: Logger) -> Response:
         return Response(code=500, body={"error": "Unexpected error occurred"})
 
 
+# pylint: disable-next=too-many-arguments,too-many-locals
 def _write_relationships(categories_list, rule_group_id, host_group_id, host_group_name,
                          policy_name, platform, whitelist, username, policy_id,
                          custom_storage, logger=None, created_by_source=None):
@@ -169,6 +175,7 @@ def _create_policy_with_rule_group(mgmt, fw_policies, policy_name, platform, pla
 
 
 @FUNC.handler(method='POST', path='/create-rule')
+# pylint: disable-next=too-many-return-statements
 def create_rule(request: Request, _: dict, logger: Logger) -> Response:
     """Create a firewall policy + rule group and persist the relationships."""
     logger.info("Starting create-rule handler")
@@ -234,6 +241,7 @@ def create_rule(request: Request, _: dict, logger: Logger) -> Response:
 
 @FUNC.handler(method='GET', path='/list-policies')
 def list_policies(_: Request, __: dict, logger: Logger) -> Response:
+    """List the policies created by this app with their categories and host groups."""
     try:
         custom_storage = get_client(CustomStorage)
         result = read_all_objects(custom_storage, "relationship", COLLECTION_RELATION_VER, logger=logger)
@@ -309,6 +317,7 @@ def _parallel_delete_relationships(rule_group_id, custom_storage, logger=None):
 
 @FUNC.handler(method='POST', path='/delete-policy')
 def delete_policy(request: Request, _: dict, logger: Logger) -> Response:
+    """Delete a policy together with its rule group and stored relationships."""
     logger.info("Starting delete-policy handler")
     try:
         body = request.body or {}
@@ -339,6 +348,7 @@ def delete_policy(request: Request, _: dict, logger: Logger) -> Response:
 
 
 @FUNC.handler(method='POST', path='/update-policy')
+# pylint: disable-next=too-many-locals
 def update_policy(request: Request, _: dict, logger: Logger) -> Response:
     """
     Replace a policy. Order matters:
@@ -422,6 +432,7 @@ def _blocking_candidates(fqdn: str) -> list:
 
 @FUNC.handler(method='GET', path='/simulate-policy')
 def simulate_policy(request: Request, _: dict, logger: Logger) -> Response:
+    """Report whether a given FQDN would be blocked by any stored category."""
     try:
         fqdn = query_param(request, 'fqdn').strip().lower()
         if not fqdn:
@@ -497,7 +508,8 @@ def _escape_fql(value: str) -> str:
 
 
 @FUNC.handler(method='GET', path='/health-check')
-def health_check(request: Request, _: dict, logger: Logger) -> Response:
+# pylint: disable-next=too-many-locals,too-many-branches,too-many-statements
+def health_check(_request: Request, _: dict, logger: Logger) -> Response:
     """Validate all policies created by the app (batched Falcon calls)."""
     logger.info("Starting /health-check handler")
     try:

@@ -1,3 +1,8 @@
+"""Handler that builds domain-blocking analytics from firewall events."""
+
+# Handlers deliberately catch every exception to log it and return a 500 response.
+# pylint: disable=broad-exception-caught
+
 import traceback
 from datetime import datetime, timedelta
 from collections import defaultdict
@@ -10,10 +15,11 @@ from falconpy import FirewallManagement
 from app_core import FUNC, get_client
 
 @FUNC.handler(method='GET', path='/domain-analytics')
-def get_domain_analytics(request: Request, _: dict, logger: Logger) -> Response:
+# pylint: disable-next=too-many-locals,too-many-branches,too-many-statements
+def get_domain_analytics(_request: Request, _: dict, logger: Logger) -> Response:
     """Generate analytics for domain blocking events."""
     logger.info("Starting /domain-analytics handler")
-    try:
+    try:  # pylint: disable=too-many-nested-blocks
         try:
             firewall_mgmt = get_client(FirewallManagement)
             logger.info("Using cached Falcon client")
